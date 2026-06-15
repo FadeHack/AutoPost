@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ hook|truncate(60) }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html, body { background: #000; }
+      .serif { font-family: ui-serif, Georgia, "Times New Roman", serif; }
+      .sans  { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body class="m-0 p-0">
+    <!--
+      Safe-zone: outer black canvas 1200x1200; inner content box capped at
+      ~840px wide and centered, so even aggressive aspect-ratio cropping by
+      downstream surfaces (LinkedIn grid, mobile previews) leaves headline
+      text inside the visible area.
+    -->
+    <div class="w-[1200px] h-[1200px] bg-black text-zinc-100 flex items-center justify-center">
+      <div class="w-[840px] h-[1080px] flex flex-col justify-between">
+
+        <!-- Slide indicator + category -->
+        <div class="flex justify-between items-baseline">
+          <div class="sans text-zinc-500 uppercase tracking-widest text-sm">
+            {{ category_label }}
+          </div>
+          <div class="sans text-zinc-400 text-base tracking-wider">
+            {{ slide_number }} / {{ slide_total }}
+          </div>
+        </div>
+
+        <!-- Slide text. text-5xl (48px) + leading-tight fits ~14 words inside the safe box. -->
+        <div class="flex-1 flex items-center">
+          <h1 class="serif text-zinc-50 text-5xl leading-tight tracking-tight">
+            {{ slide_text|default(hook) }}
+          </h1>
+        </div>
+
+        <!-- Brand strap with swipe hint -->
+        <div class="flex justify-between items-end">
+          <div>
+            <div class="w-16 h-px bg-zinc-600 mb-6"></div>
+            <div class="sans text-zinc-400 uppercase tracking-widest text-sm">
+              {{ brand_name }}
+            </div>
+          </div>
+          {% if slide_number < slide_total %}
+          <div class="sans text-zinc-500 uppercase tracking-widest text-xs">
+            Swipe &rarr;
+          </div>
+          {% endif %}
+        </div>
+
+      </div>
+    </div>
+  </body>
+</html>

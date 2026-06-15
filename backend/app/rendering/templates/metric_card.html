@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ hook|truncate(60) }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html, body { background: #000; }
+      .serif { font-family: ui-serif, Georgia, "Times New Roman", serif; }
+      .sans  { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body class="m-0 p-0">
+    <div class="w-[1200px] h-[1200px] bg-black text-zinc-100 flex flex-col justify-between px-24 py-24">
+
+      <!-- Category eyebrow -->
+      <div class="sans text-zinc-500 uppercase tracking-widest text-sm">
+        {{ category_label }}
+      </div>
+
+      <!-- Headline. If Stage 4 found a real metric, show it BIG with label.
+           Otherwise fall back to hook-as-headline. -->
+      <div class="flex-1 flex items-start mt-12">
+        {% if metric_value %}
+        <div>
+          <h1 class="sans font-black text-zinc-50 text-[160px] leading-[0.95] tracking-tight">
+            {{ metric_value }}
+          </h1>
+          <p class="sans text-zinc-300 text-3xl mt-6 leading-tight max-w-[800px]">
+            {{ metric_label }}
+          </p>
+        </div>
+        {% else %}
+        {# Fallback used when the user explicitly picks metric_card on a post
+           with no extracted metric. Tightened typography + truncate so a long
+           hook still fits the 1200×1200 canvas without overflow. #}
+        <h1 class="sans font-black text-zinc-50 text-[64px] leading-tight tracking-tight">
+          {{ hook|truncate(140) }}
+        </h1>
+        {% endif %}
+      </div>
+
+      <!-- Brand strap -->
+      <div>
+        <div class="w-16 h-px bg-zinc-600 mb-6"></div>
+        <div class="sans text-zinc-400 uppercase tracking-widest text-sm">
+          {{ brand_name }}
+        </div>
+      </div>
+
+    </div>
+  </body>
+</html>

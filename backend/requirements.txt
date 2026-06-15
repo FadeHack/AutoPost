@@ -1,0 +1,53 @@
+# Web framework
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+
+# Config / validation
+pydantic==2.10.4
+pydantic-settings==2.7.1
+
+# Database
+sqlalchemy[asyncio]==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+asyncpg==0.30.0
+
+# Scheduler
+apscheduler==3.11.0
+
+# HTTP clients
+httpx==0.28.1
+feedparser==6.0.11
+
+# LLM
+groq==1.4.0
+trafilatura==2.0.0
+
+# Rendering
+jinja2==3.1.5
+playwright==1.49.1
+
+# Storage (Supabase Storage for rendered assets)
+supabase==2.13.0
+
+# Security
+cryptography==44.0.0
+python-jose[cryptography]==3.3.0
+PyJWT[crypto]==2.10.1
+
+# Reddit
+praw==7.8.1
+
+# Utility
+python-dotenv==1.0.1
+structlog==24.4.0
+tenacity==9.0.0
+
+# PDF assembly (LinkedIn document carousel publishing)
+img2pdf==0.6.3
+
+# Testing
+pytest==8.3.4
+pytest-asyncio==0.25.0
+pytest-mock==3.14.0

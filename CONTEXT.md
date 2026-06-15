@@ -1,0 +1,710 @@
+# CONTEXT.md — Persistent Engineering Memory
+
+The "what & why" of this project. Updated after every major architectural step. Anyone (or future-you) should be able to load this file and understand the entire system without reading the code.
+
+**Last updated:** 2026-06-03 (Phase 8 Chunk G — Native LinkedIn carousel via Documents API. Multi-slide carousels now publish as PDF document posts (`/rest/documents` + `/rest/posts` with `content.media`) so the live experience is the swipeable native LinkedIn carousel instead of the previous MultiImage grid (which clipped slide text). New `app/rendering/pdf.py` assembles slide PNGs into a multi-page PDF via `img2pdf`; `linkedin_client` gains the full Documents-API surface including async-processing polling; `publisher._attempt_publish` routes any len ≥ 2 asset batch through the document path and stamps every slide's `linkedin_asset_urn` with the shared document URN. `carousel_slide.html` got a tightened safe zone (1200×1200 outer / 840×1080 inner box, text-6xl → text-5xl). 172 tests still passing.) **Phase 8 complete.** Chunks C + D + E: APScheduler restart-survival verified live (kill-restart cycle, one-shot job rehydrated from `SQLAlchemyJobStore` and fired on time); full pipeline smoke verified live; README rewritten to reflect Phase 6/8 state and fix the `.env` path bug. Chunk E mid-phase: fixed the hook + tag duplication bug on the live LinkedIn post. Stage 3 prompt now requires `body` to exclude the hook line and trailing hashtag line; new `generator.clean_body(hook, body)` helper applies that deterministically at parse time; `publisher._build_commentary` runs the same helper at publish time so legacy drafts ship correctly without re-generation; `LinkedInPreview` now takes a `hook` prop so dashboard preview matches the live post. Backend suite 172 passing. Chunks A + B. Chunk B — Failure surfacing: two new endpoints — `GET /posts/{id}/logs` (lists PublishingLog rows newest-first) and `POST /posts/{id}/retry` (resets `failed → approved`, clears `post.error`, re-runs `publish_post`). Frontend `/drafts/[id]` gets a prominent red Failed panel with the error, a Retry button, and an expandable Attempt history fed by `/logs`. Chunk A — Auth health surface. Dashboard `frontend/app/page.tsx` gains a `tokenExpiry()` helper + a top-of-page banner driven off `expires_at` from `/auth/linkedin/status`: silent > 10d, amber ≤ 10d, red ≤ 3d or already expired. Each tier surfaces a "Reconnect LinkedIn" CTA — the operational fix for the day-60 manual re-OAuth that standard dev apps require. No backend change needed; `expires_at` was already on the status response since Phase 1. The "dedupe linkedin_accounts rows" checklist item turned out to be N/A — `UniqueConstraint('user_id', 'account_kind')` has been enforced since the initial schema migration.)
+
+Phase 6 Chunk D — End-to-end smoke verified live: publish-now and scheduled APScheduler fire both produce real LinkedIn posts. Token-refresh path is built correctly but **structurally unreachable** on a standard LinkedIn dev app — LinkedIn doesn't issue refresh tokens with just `w_member_social` scope. Access tokens last ~60 days, then the operator re-runs OAuth. Phase 6 is functionally complete; ready to start Phase 7 (Analytics).
+
+---
+
+## What This Project Is
+
+An AI-powered LinkedIn company branding & content automation platform. Fetches fresh tech/startup/AI trends, generates founder-voice posts via Groq LLM, renders branded visuals from HTML/Tailwind templates with Playwright, and auto-publishes to a LinkedIn company page on schedule with human-in-the-loop approval.
+
+Internal-first for one company page, but architected to evolve into multi-company / multi-platform.
+
+---
+
+## High-Level Architecture
+
+Seven loosely-coupled subsystems backed by one Postgres database. Subsystems communicate via the DB or in-process function calls — never HTTP between subsystems.
+
+```
+RETRIEVAL → INTELLIGENCE → RENDERING → DASHBOARD (human approval) → SCHEDULER → PUBLISHING → ANALYTICS
+```
+
+| # | Subsystem | Location | Responsibility |
+|---|-----------|----------|----------------|
+| 1 | Retrieval | `backend/app/retrieval/` | Pull items from RSS, HackerNews, Reddit → `trends` table |
+| 2 | Intelligence | `backend/app/intelligence/` | Groq LLM turns trends into founder-voice drafts → `posts` |
+| 3 | Rendering | `backend/app/rendering/` | HTML/Tailwind templates → PNG via Playwright → `generated_assets` |
+| 4 | Scheduler | `backend/app/scheduler/` | APScheduler in-process, Postgres jobstore |
+| 5 | Publishing | `backend/app/publishing/` | LinkedIn OAuth + UGC Posts API |
+| 6 | Dashboard | `frontend/` | Next.js — preview, edit, approve, schedule |
+| 7 | Analytics | `backend/app/analytics/` | Poll LinkedIn share stats hourly |
+
+---
+
+## Decisions Made
+
+Each entry: **decision** — *rationale*.
+
+### 2026-06-13 (Phase 10 — AI image generation add-on)
+- **AI image is additive, not a replacement.** `render_post(kind: RenderKind = RenderKind.template)` — every existing caller keeps the templated Playwright path unchanged; AI image is opt-in per render. Templated cards remain the on-brand default per [[project_visual_style]]. The whole point of Phase 10 was a *second* renderer backend behind the same seam, not a swap.
+- **`generated_assets.render_kind` is a native Postgres enum, server-defaulted to `'template'`.** Backfills every pre-Phase-10 row to `'template'` via `server_default` — zero data migration, zero behavior change for existing assets. Chose native enum over varchar+check so the value set is enforced at the DB and the model imports a real Python `RenderKind` enum (consistent with `PostStatus`, `AccountKind`, `TemplateCategory`).
+- **Cloudflare Workers AI flux-1-schnell is primary; Pollinations is the soft fallback.** Web-verified June 2026: Cloudflare endpoint `/accounts/{id}/ai/run/@cf/black-forest-labs/flux-1-schnell` returns `{result.image: <base64>}`; free tier 10k neurons/day ≈ 260 images. Pollinations `image.pollinations.ai/prompt/{q}?model=flux` is no-auth but had documented Flux outages in 2026 (pollinations#8201) — that's exactly why it's the fallback, not primary. Composer `generate_image(prompt, primary?, fallback?)` swallows *any* exception from primary (including `CloudflareConfigError` for missing creds) → logs `ai_image.primary_failed` with error class → calls fallback. Tests inject mock generators via the two kwargs, no monkeypatching needed.
+- **Cloudflare config falls back on `None`, not on falsy.** `CloudflareFluxGenerator(account_id="")` must hit the missing-creds path, not silently pick up settings. Constructor uses `settings.X if param is None else param` instead of `param or settings.X` so tests can force the config-error branch by passing `""`.
+- **Stage 5 (AI-image prompt) lives in the same `Post.extracts` JSONB**, not a new column. Per the Phase 4 Chunk D precedent — JSONB absorbs new fields without a migration. Stage 5 runs in `run_pipeline()` after Stage 4 on the FAST model (llama-3.1-8b-instant, temp 0.4, 200 max_tokens) — well under the $0.0002/post cost target. Persisted as `extracts["ai_image_prompt"]`.
+- **Brand-safe fallback prompt for Stage 5 failures.** When the model returns bad JSON or an empty string, `extract_ai_image_prompt` returns a hard-coded string ("minimalist editorial illustration on a near-black background, soft contrast, one subject centered, no text"). The renderer never has to handle a missing prompt mid-render — the contract is "always a usable string." Bad JSON logs a warning so we can spot if the FAST model starts regressing on the JSON contract.
+- **Lazy Stage-5 backfill on first AI-image render.** `_ensure_ai_image_prompt(session, post)` mirrors the existing Stage-4 lazy-extract pattern in `render_post`: if `post.extracts.ai_image_prompt` is missing (any draft generated before Phase 10), run Stage 5 inline against `post.body` and persist onto the JSONB. Subsequent AI renders skip the LLM call. Older drafts upgrade silently — no batch backfill needed.
+- **`ai_image_wrap` template is the only `TemplateCategory.ai_image` entry, picked by name in the renderer.** The category default-pick mapping (`PostCategory → template name`) intentionally never resolves to `ai_image_wrap` — picking it requires either the operator selecting "AI image (Flux)" in the UI or calling `render_post(kind=ai_image)` directly. The frontend dropdown filters `ai_image_wrap` out of the regular template list so it can't be picked twice (once as "Template" and once as "AI image"). Sentinel value `__ai_image__` in the `<select>` is what triggers the AI-image branch.
+- **Brand-wrap composite (1200×1200 wrapper + 800×800 Flux inset) over raw Flux passthrough.** Considered shipping the bare 800×800 Flux PNG directly to LinkedIn — much simpler. Rejected because the rest of the feed is the templated Nestwhirr identity (black bg, eyebrow, brand strap) and a bare AI image breaks visual consistency, looks like a different brand posted it. The wrapper costs one Playwright pass per render (~1s) and keeps every asset on-brand.
+- **API surfaces `render_kind` on `GeneratedAssetRead`** so the UI can label assets. Without this the operator can't distinguish a templated card from an AI image in the earlier-renders strip after a refresh — both are just 1200×1200 PNGs.
+- **Tests: adapters mock httpx via `MockTransport` (mirroring `linkedin_client` pattern), Stage 5 mocks `groq_client.chat`, brand-wrap template tested as pure Jinja2 (no Playwright).** No new pytest fixtures needed beyond the per-module httpx patch. End-to-end (Flux call → composite → Supabase upload → LinkedIn ship) verified manually 2026-06-13.
+
+### 2026-06-11 (Phase 9 — Lifecycle reversals + trend/draft deletion)
+- **Reversals are first-class endpoints, not query-string flags on existing ones.** `POST /posts/{id}/unapprove` and `POST /posts/{id}/unschedule` mirror the forward verbs (`/approve`, `/schedule`). Tried: a single `PATCH /posts/{id}` with `status: "draft"`. Rejected because the lifecycle gate has different valid sources per transition — encoding that in a generic PATCH leaks state machine logic into the client and makes the audit grep ("when did we ever unschedule?") harder. One endpoint per transition keeps the state machine in the router and the logs clean.
+- **`DELETE /posts/{id}` is gated on `{draft, failed}`, not free for all.** Approved/scheduled posts must be reversed first (unapprove or unschedule). Forces the operator through the explicit cancel-the-scheduler step instead of letting a DELETE silently abandon a queued APScheduler job that would still fire and 500 on a missing post. Publishing/published are deferred per the Phase 9 cut — published-delete is high-blast-radius (LinkedIn-side, not just DB) and low real demand.
+- **`ai_generations.post_id` keeps `ON DELETE SET NULL`, not CASCADE.** A draft delete should not erase the LLM audit trail — those rows are cheap and useful for "why did this category produce a bad post" forensics across deleted drafts. `generated_assets` and `publishing_logs` correctly CASCADE because they're tied to the post's lifecycle (no point keeping a rendered PNG for a deleted draft, and a `publishing_log` with no post is just noise).
+- **`cancel_publish` lives inside the unschedule endpoint, not in a model hook.** Considered: SQLAlchemy `before_update` on `Post.status` that drops the APScheduler job when transitioning out of `scheduled`. Rejected because the scheduler is a process-level singleton and reaching into it from an ORM event handler creates non-obvious side effects on every test that touches a Post row. Explicit call in the router keeps the scheduler dependency exactly where the user-visible action lives.
+- **Trend sweeper retention defaults to 60 days, configurable via `TRENDS_CONSUMED_RETENTION_DAYS`.** 60d covers analytics windows ("did the post from that consumed trend perform well?") without letting the table compound forever. Sweeper runs daily at 03:30 (`TRENDS_CLEANUP_CRON`), well clear of the 06:00 retrieval slot to avoid lock contention. Unconsumed rows are never swept — they're the working pool.
+- **Bulk-delete caps at 500 IDs per request.** Pydantic `Field(min_length=1, max_length=500)` enforces it at the API boundary. 500 is well above any realistic UI multi-select (the `/trends` list page caps at 100 visible) and well below what would cause a connection-pool stall on a single transaction. Single statement (`DELETE FROM trends WHERE id IN (...)`) — no per-row round trip.
+- **Frontend: optimistic delete with snapshot rollback, not pessimistic spinner.** Both `/trends` and `/drafts` list pages remove the row from state before the API call, then restore the snapshot on error. Network is fast on local + Supabase Session Pooler; a confirm-then-spinner pattern would feel sluggish for a destructive action that's already gated by a `confirm()` prompt. The rollback on `ApiError` is the safety net.
+- **Hover-trash is gated by status on `/drafts`**, not always visible. Only `{draft, failed}` rows show the ✕ icon — matches the backend gate exactly so the operator never gets a 409 from a button that shouldn't have appeared. Approved/scheduled rows funnel through the detail page where the unapprove/unschedule lifecycle is explicit.
+- **Endpoint behavior covered by manual E2E, lifecycle gates covered by unit tests.** Followed the existing repo convention (test_posts.py): unit tests assert the *invariants* (gate-allowed status sets) so future refactors that drift the lifecycle are loud, but the wet path (DB write, scheduler call, cascade) is verified end-to-end against the live dev DB and the live UI loop. The sweeper got an inline round-trip verification (insert 65d-old + fresh + 5d-old → run job → assert exactly the 65d-old was deleted) on 2026-06-11.
+
+### 2026-06-02 (Phase 6 Chunk D — End-to-end smoke against real LinkedIn)
+- **Live publish-now verified.** Draft → approve → render → click Publish now → ~14s later post is live on LinkedIn. URN `urn:li:share:7467618890898919424` came back in the `x-restli-id` header exactly as the [Posts API docs](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api?view=li-lms-2026-05) specify. The full pipeline executed: Supabase Storage GET (140KB PNG) → LinkedIn `/rest/images?action=initializeUpload` (200) → DMS binary PUT (201) → `/rest/posts` (201) → DB commit with `linkedin_urn` + `published_at`. Single `PublishingLog` row written with `status=success`.
+- **Live scheduled fire verified.** APScheduler job persisted via `SQLAlchemyJobStore` fired at the exact `run_date`; the publisher ran end-to-end under its own session (not the FastAPI request session) and the post transitioned `scheduled → publishing → published` automatically with no operator action. The `publish:<id>` job id pattern means a backend restart between schedule and fire-time picks up the same job from the DB and continues.
+- **Refresh-token path is structurally unreachable on a standard LinkedIn dev app.** Smoke 3 forced `expires_at = now() + 1min` via SQL, then ran publish-now. The publish succeeded — but the refresh log lines (`publisher.token.refreshing` / `publisher.token.refreshed`) never appeared. Diagnosis: `refresh_token IS NULL` on the `linkedin_accounts` row. The `ensure_fresh_token` guard (`if not stale OR not refresh_token: return decrypt(access)`) short-circuits before checking staleness. The access token still worked because LinkedIn validates tokens against their own table, not our `expires_at` column — the 1-min expiry was only in our DB, LinkedIn still saw a token with 59 days of life.
+- **LinkedIn doesn't issue refresh tokens for `w_member_social`-only apps.** This is the real operational constraint, not a code bug. Refresh tokens are gated behind **Marketing Developer Platform** approval — same legal-entity + manual-review path as the Community Management API. Our app has standard "Sign In with LinkedIn" + "Share on LinkedIn" products, which grant 60-day access tokens but no refresh. The OAuth code IS storing `refresh_token` if LinkedIn sends one ([oauth.py:152](backend/app/publishing/oauth.py#L152)); LinkedIn just never sends one for this app tier.
+- **Operational reality at day ~60:** the access token dies, posts start 401'ing, the publisher's auth-error branch marks them `failed`. Recovery: operator clicks "Connect LinkedIn" on the dashboard (which already exists from Phase 1) → re-OAuth → fresh 60-day window. No data loss; failed posts can be retried via Publish now once the token is refreshed. The day-60 surprise is the worst part of the UX — added a Phase 8 task to surface a "token expires in N days" banner on the dashboard so the operator has lead time.
+- **Two duplicate rows in `linkedin_accounts` discovered.** Both `account_kind='personal'`, distinct `user_id`s (the unique constraint is `(user_id, account_kind)` so it didn't catch them). Likely from an earlier dev session that signed in via a second magic-link email and reconnected LinkedIn. The publisher's `LIMIT 1 ORDER BY created_at DESC` picks the most recent and works fine, but the dead row is data hygiene debt. Added to Phase 8 cleanup.
+- **Org-page posting is not happening today and won't without LinkedIn-side approval.** Verified live: the publisher correctly posts as `urn:li:person:<member_sub>` because `account_kind='personal'`. Pivoting to `account_kind='organization'` requires (a) Community Management API approval (legal entity, business email, screencast review, multi-week wait), (b) re-OAuth with `w_organization_social` scope, (c) the authenticated user holding an ADMIN role on the target Company Page. The code path is already in place ([linkedin_client.py author_urn()](backend/app/publishing/linkedin_client.py#L96-L109)) — the only blocker is LinkedIn-side approval.
+
+### 2026-06-01 (Phase 6 Chunk C — Scheduler wiring + endpoints)
+- **`publish_post_job` owns its own DB session.** APScheduler runs jobs outside the FastAPI lifespan, so `Depends(get_session)` doesn't apply. The job opens `AsyncSessionLocal()` as a context manager and threads it through `publish_post`. The session is short-lived (one publish cycle, ~5-20s), and SQLAlchemy's connection pool handles checkout/return.
+- **Job id format is `publish:<post_id>`, not a random opaque string.** Stable per-post so `replace_existing=True` on reschedule swaps the trigger atomically, and `remove_job(jid)` on publish-now can pre-empt the queued one-shot without scanning. APScheduler's `SQLAlchemyJobStore` persists by id, so a backend restart picks up the same job; if the operator reschedules in between, they edit the row, not append a duplicate.
+- **`misfire_grace_time = 3600` on the publish trigger.** If the scheduler is offline at fire time (deploy, crash, planned restart), APScheduler treats the job as "misfired" and skips it once the scheduler restarts — unless a grace window says otherwise. One hour means: scheduled at 3pm, backend down 2:55–3:10pm, comes up at 3:10 → still publishes (3:10 ≤ 3:00 + 1h). Larger window than the retrieval cron (10 min) because publishing is a discrete user-intent action where late-by-an-hour is better than silently skipping; retrieval is recurring and dropping one cycle is fine.
+- **Late-import of `publish_post` inside `publish_post_job`.** `app/scheduler/jobs.py` is imported at app startup (via `register_recurring_jobs`), and `publish_post` drags in `httpx`, `supabase-py`, the `LinkedInAccount`/`PublishingLog` models — none of which the scheduler needs to register its retrieval cron. Late import keeps the startup chain narrow and any future test that wants to inspect the scheduler doesn't load the LinkedIn surface as a side effect.
+- **`publish-now` cancels any pending APScheduler job first.** If the operator scheduled for 10pm and clicks Publish now at 9:55pm, both paths would otherwise fire (publish-now wins inline, then the APScheduler one-shot tries 5 minutes later on an already-published post and `publish_post` correctly rejects on status — but a noisy PublishingLog row gets written and the operator sees an unexplained failure log). Cancelling the queued job avoids the duplicate-fire entirely. If cancel finds nothing (no schedule was set), that's fine — `cancel_publish` returns False without raising.
+- **Publish-now raises 502 on `status=failed`, not 200 with an error field.** REST semantics: the upstream LinkedIn call failed, so 5xx is correct. The body carries `post.error` (which includes the LinkedIn HTTP status code from Chunk B) so the dashboard's red error panel shows something diagnostic. The Post row is still updated to `status=failed` + `error=...` in the DB regardless — the operator sees the same final state by refetching the post. Choosing 200-with-error would force every frontend consumer to remember to inspect `status`/`error` instead of relying on standard HTTP error handling; 502 plus the error body is cleaner.
+- **Emerald button color for "Publish now," distinct from the indigo Schedule and blue Approve.** Three CTAs on the same action bar, all advancing the lifecycle, each needs to be visually distinct so the operator doesn't fat-finger. Color mapping: blue = approve (the "OK this is good" cue, same as the publish flow's first commit), indigo = schedule (the "queue for later" cue, neutral hue), emerald = publish now (the "this goes live now" cue, green for go/positive but bright enough that it never blends into the page background). Plus a `confirm()` gate on the click — irreversible action, friction is appropriate.
+- **No new tests in Chunk C.** The endpoints are thin glue (status guard + commit + scheduler call) and the underlying surfaces — `publish_post` (Chunk B, 24 tests), `schedule_publish` / `cancel_publish` (one-line wrappers around APScheduler's own well-tested API), the lifecycle gate (already tested via the approve + schedule endpoints in Phase 5) — are all covered. The fire-time path itself (job → session → publisher) only exercises code already under test; the real verification is the Chunk D end-to-end smoke against live LinkedIn.
+
+### 2026-06-01 (Phase 6 Chunk B — Publisher orchestration)
+- **Three-tier error classification is the whole publisher.** Most of the publisher's logic is one decision: "what kind of LinkedIn error is this and what do I do about it?" `_classify(LinkedInAPIError)` returns `auth | transient | permanent`. **auth** (401/403): the access token was rejected — force a refresh (set `expires_at = now` so `ensure_fresh_token` re-fetches) and try once more. If still auth, treat as permanent — refresh-token is bad too, operator needs to reconnect. **transient** (429, 5xx): LinkedIn's problem — exponential backoff (2s, 4s) up to `MAX_ATTEMPTS=3`. **permanent** (other 4xx like 400/422): we sent something LinkedIn rejected — don't retry, mark failed, surface to operator. This three-bucket model covers every realistic failure without ad-hoc per-status handling.
+- **Status flip to `publishing` commits before any HTTP work.** The lifecycle gate (`status in {approved, scheduled}`) is checked, then the row commits with `status=publishing` *before* the first network call. If APScheduler crashes mid-publish or two workers somehow race, the lock is visible in the DB. A future "stale publishing" sweeper job can pick up any row stuck in `publishing` past N minutes — that's a Phase 8 hardening task, not MVP.
+- **`publishing_logs` is append-only, one row per attempt regardless of outcome.** Success rows carry `linkedin_response={"urn": "..."}`; failure rows carry the truncated LinkedIn body (4 KB cap) + the error message (500-char cap). That's enough to diagnose what LinkedIn rejected without bloating the table with full response payloads. The eventual analytics layer (Phase 7) reads this table for retry-rate dashboards.
+- **Token freshness is checked per-attempt, not once up front.** A refresh between attempts costs nothing extra but covers the edge case where attempt 1 fails with 401, the publisher forces `expires_at = now`, and attempt 2 must see the staleness before its own create_post call. Putting `ensure_fresh_token` at the top of every attempt loop closes that race without special-casing the auth-retry path.
+- **Carousel batch selection mirrors the frontend's 60s-window detection.** The frontend's Phase 4 Chunk G `LinkedInPreview` decides which slides are "the current batch" using a 60-second window between consecutive `carousel_slide` assets. The publisher uses the same window so what the operator approved is what ships. The alternative (a `batch_id` column on `GeneratedAsset`) is cleaner but premature — the timestamp heuristic is exact in practice because batches commit in a single transaction with sub-second timestamps. Add `batch_id` only when there's a real race to disambiguate.
+- **Image download via httpx, not supabase-py.** The bucket is public (decided in Phase 4 Chunk E for exactly this reason — LinkedIn's ingest can fetch). Internal downloads use the same public URL via plain httpx — one HTTP GET, no SDK round-trip, no service-role-key in flight. supabase-py download would add a sync client + thread hop for zero benefit.
+- **Single personal LinkedIn account lookup (MVP).** `_load_personal_account(session)` selects the latest `account_kind=personal` row. `Post` has no `user_id` column today; in the single-user MVP that's fine. Phase 8 (or whenever multi-tenant lands) will add `Post.user_id` and switch this lookup to `Post.user.linkedin_accounts`. The column doesn't exist yet so adding it now would be premature — multi-tenant is far off and the upgrade is one Alembic migration + one query change.
+- **`raw_request` persisted on the Post on success.** The exact payload that we POSTed to `/rest/posts` is stored in `post.raw_request` (JSONB). Cheap insurance for replay debugging — "what did we actually send" is often the question after a weird LinkedIn rendering result, and storing it solves the answer.
+- **`PermanentPublishError` raised only for pre-flight failures** (missing post, wrong status, no connected account). LinkedIn HTTP failures inside the attempt loop never escape as exceptions — they flow into the status-flip path and the publisher returns a `Post` row with `status=failed` and `error=...`. Caller (the scheduler job or `publish-now` endpoint) can branch on `post.status` without try/except gymnastics for the normal failure paths, only for the unrecoverable pre-flight cases.
+
+### 2026-06-01 (Phase 6 Chunk A — LinkedIn HTTP client)
+- **Pure HTTP module, no DB.** `app/publishing/linkedin_client.py` is the seam where every byte that touches LinkedIn passes through. It knows nothing about `Post`, `GeneratedAsset`, or `LinkedInAccount`. The publisher (Chunk B) will compose this with DB orchestration. Rationale: every LinkedIn call needs deterministic test coverage (we can't hit production LinkedIn from CI), and a pure-HTTP module is mockable via `httpx.MockTransport` without any DB fixtures. Same split that worked for `groq_client` and `article` in Phase 3.
+- **One client surface, three endpoint shapes.** Image init (`POST /rest/images?action=initializeUpload`), binary upload (`PUT {uploadUrl}` with `application/octet-stream`), and post create (`POST /rest/posts` returning URN in the `x-restli-id` response header). The Posts API replaces the deprecated `/v2/ugcPosts` and accepts three content shapes: text-only (no `content` key), single image (`content.media.id`), and MultiImage (`content.multiImage.images[]`, 2-20 entries). Three matching payload builders, all sharing one `_post_envelope` so the published shape stays consistent across post types.
+- **Web-verified specs before writing code, per CLAUDE.md rule.** Microsoft Learn `li-lms-2026-05` is the canonical source (LinkedIn's docs site is just an alias). Verified: required headers (`Authorization`, `X-Restli-Protocol-Version: 2.0.0`, `LinkedIn-Version: YYYYMM`, `Content-Type: application/json`), success codes (`201` for create_post, `200` for initialize, `201` for binary PUT), URN response location (`x-restli-id` header, not body), and MultiImage organic support (sponsored carousels are a different `content.carousel` shape requiring a separate API — not supported in MVP).
+- **Carousel = MultiImage, not Carousel.** LinkedIn's docs use "Carousel" for paid/sponsored ads only — that's the `content.carousel` payload shape with `cards[].landingPage`. Organic multi-image posts (what we want for our slide decks) use `content.multiImage.images[]`, max 20, no landing pages. Our `PostCategory.carousel` resolves to this. Renamed in the function (`build_multi_image_post_payload`) to match the LinkedIn doc terminology so future-you doesn't grep "carousel" and pull in ad code.
+- **`x-restli-id` is the only place the URN appears.** A 201 body from `/rest/posts` is empty; the URN comes back as the `x-restli-id` response header (case-insensitive — httpx normalizes). Surface the shape `urn:li:share:NNN` (or `urn:li:ugcPost:NNN` for legacy responses) directly to the caller; the existing frontend `linkedinUrlFromUrn()` helper (Phase 5 Chunk C) already knows how to render either form into the public activity URL.
+- **Little-text escape is defensive, not load-bearing today.** LinkedIn's `commentary` field uses a "little text format" where `\<>#~_*[](){}@|` are reserved for things like `@[Mention](urn:...)` and `{hashtag|#|x}` templates. Plain `#hashtag` works as-is (LinkedIn parses + auto-converts on read). Our generator never emits mentions or those special chars today, but the escape is cheap insurance — if voice tuning ever produces `(parenthetical)` or `@person`, the publish doesn't break. `escape_commentary()` is exposed but the publisher will pick whether to call it; for now I'd default to ON in Chunk B.
+- **`LinkedInAPIError(status, body)` carries the HTTP envelope.** The publisher in Chunk B will categorize: `401/403` → token issue (refresh + retry once), `429` → rate limit (back off), `5xx` → transient (retry with exponential backoff up to 3), `4xx other` → permanent (mark `failed`, surface to operator). The HTTP-layer client doesn't make those decisions itself — it raises with the envelope and the orchestrator decides. Same pattern as the Groq client's tenacity retries.
+- **Token refresh seam is here, not in Chunk B.** `refresh_access_token()` is a one-line re-export of `oauth.refresh_token` and `_is_token_stale(expires_at)` checks against a 5-min refresh lead. Chunk B adds the DB-side `ensure_fresh_token(session, account)` that wraps these two with decrypt + persist. Keeping the staleness check at the HTTP layer means the test (a pure datetime comparison) doesn't need a DB fixture.
+- **30s HTTP timeout, not 10s.** Image init + binary upload to LinkedIn's `dms-uploads` endpoint occasionally takes 5-10s for a 200KB PNG (Supabase Storage is fast, LinkedIn's ingest is slower). 30s gives slack for cold buckets without letting a truly-hung request block a scheduler tick forever. Connect timeout is 10s — that's network setup, which should never legitimately need more.
+
+### 2026-06-01 (Phase 5 Chunk C — schedule path + queue pages)
+- **One endpoint for both initial schedule and reschedule.** `POST /posts/{id}/schedule` accepts `status` in `{approved, scheduled}`, sets `scheduled_at`, flips to `scheduled` (no-op on second call). Considered a separate `PATCH /posts/{id}/scheduled-at`, but the action is conceptually the same: "publish at this time." Splitting would force the frontend to switch endpoints based on current state for no real difference in behavior. The endpoint name "schedule" reads accurately for both — you're (re-)scheduling.
+- **No `unschedule` endpoint in Chunk C.** Reverting `scheduled → approved` is a real future need (operator changes their mind, wants to edit again), but adding it now means designing the UX too. The current Reschedule button covers "change the time"; the "abandon entirely" path is rare enough that DB poking is fine until someone asks. Deferred.
+- **`MIN_SCHEDULE_LEAD_SECONDS = 60s` server-side, 70s client-side.** Server gate prevents a "schedule for right now" race against the APScheduler tick that Phase 6 will wire — if the worker is mid-poll when the row commits, it could miss it. 60s is enough lead time that the next poll cycle picks it up. Client mirrors at 70s so the user sees the "pick at least ~1 min in the future" error before clicking (no server round-trip), with a 10s skew buffer to absorb client/server clock drift.
+- **Naive datetime → UTC at the API boundary.** `<input type="datetime-local">` produces wall-clock time with no offset; `new Date(localValue).toISOString()` converts it to UTC correctly using the user's TZ. Backend's Pydantic parse leaves it tz-aware (or tags naive as UTC). This is the standard "user picks local time, server stores UTC, client renders local" pattern. The user's TZ label appears in the picker header so there's no ambiguity about what "3:00 PM" means.
+- **Default value is `now + 15 min` rounded up to the next 5-min mark.** Picked 15 minutes because it's "soonish but not racing the server gate" — gives the user time to second-guess and reschedule without rushing the picker. The 5-min rounding makes the time look intentional (you'd write "3:00 PM", not "2:53 PM") and lets the operator skim a series of scheduled times without having to scan minutes-precision noise. Both knobs are local — no env var.
+- **Lists sort client-side, not via the API.** `GET /posts?status=X` always returns `created_at DESC` per the existing contract. For `/scheduled` we want next-up-first (`scheduled_at ASC`), for `/published` most-recent-first (`published_at DESC`). Adding a `sort=` query param would broaden the API surface for two callers; sorting after fetch is simpler and the result set is capped at 100 anyway. If we ever hit 1K+ rows, the right fix is server-side keyset pagination, not client sort.
+- **`linkedinUrlFromUrn()` returns null for unrecognized URN shapes.** LinkedIn's URN forms (`urn:li:share:NNN`, `urn:li:ugcPost:NNN`) all redirect to the canonical `feed/update/urn:li:activity:NNN/` URL when you swap the last segment. The helper extracts the numeric ID and builds the activity URL; if the URN is missing, malformed, or the suffix isn't all-digits, returns null and the row shows "No LinkedIn link" instead of a broken link. Phase 6 will populate this column for the first time; this is the consumer-side rendering ready and waiting.
+- **Reschedule is the same Save flow as initial Schedule** — the picker pre-populates with the current `scheduled_at` when re-opened, and the button label flips ("Schedule" → "Update schedule") so the user knows the form is in edit mode. No mode switch in state — `initialScheduledAt` prop drives both the default value AND the button label.
+- **Dashboard nav has separate cards for Drafts / Scheduled / Published**, not one combined "Posts" card. Three distinct mental modes: write (drafts) / queue (scheduled) / archive (published). Each card has a one-line description tuned for "what's the state of work I have at this stage." Could collapse later if the dashboard feels heavy; today four cards (LinkedIn, Trends, Drafts, Scheduled, Published) is fine on a single screen.
+
+### 2026-06-01 (Phase 5 Chunk B — approve flow + LinkedIn preview)
+- **Approve is a one-line status transition, not a heavier "review packet" flow.** The endpoint loads, gates on `status='draft'`, flips to `approved`, commits. No reviewer comment, no checklist enforcement, no "approved by user X" audit beyond the existing `updated_at`. Why: the operator is the user; there's no team approval workflow to design for at MVP. Adding columns or audit rows now would be premature. If team approvals become a real need, the schema gets an `approvals` table — additive, no rewrite.
+- **LinkedIn preview is fidelity-of-content, not fidelity-of-chrome.** The signal the operator needs before approving is "does my body text render with the right line breaks, do my hashtags look right, does the image hang where it should." That's the 90% — not pixel-perfect avatars, not the live engagement count animations. Trying to match LinkedIn's chrome exactly is an infinite chase (they ship visual tweaks weekly) and the divergence is more confusing than helpful. The component does mimic the basic feel — white card, dark text, blue hashtag links (`#0a66c2`), avatar + name + headline header — but stops short of pretending to be the real thing.
+- **Author name pulled from the Supabase session email's local part, not from a stored LinkedIn profile.** Reason: we don't store LinkedIn display name / headline / avatar yet — `linkedin_accounts` keeps only `member_sub` (the OIDC subject ID) and the encrypted tokens. Pulling display data is a Phase 6 task (the publisher needs the author URN, and we'll incidentally have a chance to cache name + headline + picture URL at OAuth callback time). For now, `session.user.email.split('@')[0]` is a decent stand-in (shows "shivam" for shivam@sacomt.com); the placeholder doesn't affect the actual publish payload.
+- **Carousel preview shows slide 1 + a "1 / N" badge, not all N stacked.** The detail page already has the dedicated Carousel slides strip (Chunk G) for browsing every slide. Repeating that inside the preview would double up the surface for no new information. The single-slide preview matches what a LinkedIn viewer actually sees first — they have to swipe to see slides 2..N anyway.
+- **Body is rendered as a single `<p>` with `whitespace-pre-wrap`**, not split on `\n` and joined with `<br>`. Equivalent visually, simpler code, and copy/paste from the preview preserves the newlines the way the user sees them. The generator's voice rules use short lines + line breaks for breathing room; this is the rendering side of that contract.
+- **Approve button uses a blue primary CTA (not white-on-black like Save/Render).** Visual hierarchy: the approve action is the one we want the operator to click most often, distinct from the "neutral" edit/render actions. Picked LinkedIn-blue (`bg-blue-600`) deliberately to associate it with "publishing to LinkedIn" — small cue but the action bar is dense and the color codes the intent.
+- **Edit + Approve buttons are both gated on `status='draft'` with status-aware tooltips.** Once approved, both grey out and explain why; the operator can't fall into the "I clicked Edit and nothing happened" trap. Approved → "Approved ✓" label flip is a tiny but important state mirror — the button confirms the action took without needing the user to read the status badge.
+
+### 2026-06-01 (Phase 5 Chunk A — editing path)
+- **Editing is gated on `status='draft'`, no exceptions.** The CLAUDE.md lifecycle is `draft → approved → scheduled → publishing → (published | failed)` with no skipping. If editing were allowed on `approved`, the approval gate would mean nothing — anyone could change content under an approved label. Backend returns 409 for any non-draft PATCH; frontend disables the Edit button with a lock-tooltip. If a user wants to change an approved post, the future "revert to draft" path or regenerate is the answer. Not adding revert in Chunk A — there's no real need yet, and adding it before there's a user complaint risks designing for a hypothetical.
+- **Tag normalization happens server-side**, not client-side. The frontend has its own lowercase + hash-strip in `DraftEditor` for nice live UX (chip preview matches what'll be saved), but the canonical sanitization runs in `app/api/posts.py::normalize_tags`. Why: the database is the source of truth, and a future second client (CLI, mobile, API consumer) would otherwise need to duplicate the rules. The helper handles: lowercase, strip leading `#`, trim, dedupe (order-preserving — first occurrence wins), cap at 6 tags, truncate any tag past 40 chars. Cap at 6 (not 3, even though voice guidelines say "max 3 hashtags in a post") because tags in the DB include both LinkedIn hashtags and internal taxonomy markers; the rendering layer + publisher will subselect when posting. Today they're the same, but the headroom is cheap and protects future divergence.
+- **`PATCH` is partial, not replace.** Body shape is `{hook?, body?, tags?}` — any omitted field is left untouched. Saves bandwidth and avoids the "missing field = null it out" footgun. Validated via `Field(default=None, min_length=1, max_length=512)` on hook and `min_length=1` on body so passing empty strings 400s — empty hook/body is never valid.
+- **Editor is a separately mounted client component**, not inline in the page. Reason: the draft detail page is already 470+ lines doing visual rendering, carousel batch detection, asset fetching, and now editing. Extracting `DraftEditor.tsx` keeps the page tractable and sets the pattern for the upcoming `LinkedInPreview` (Chunk B) and `SchedulePicker` (Chunk C) components. Editor receives only what it needs (initial values + saving flag + callbacks) — no coupling to the full `Post` type or to the API helpers.
+- **Auto-resizing textareas via ref + scrollHeight effect**, not a CSS-only solution. The pure-CSS `field-sizing: content` is too new for safe cross-browser use yet, and `<input>` doesn't support multiline. The ref approach is one shared `useAutoResize` hook in `DraftEditor.tsx`, called twice (hook + body). Reflows on every keystroke (cheap for a single textarea).
+- **Backspace-on-empty pops the last tag.** Common chip-input UX — matches GitHub's tag picker, Linear's labels, Notion's multi-select. The alternative (only × to remove) is fine but slower for keyboard users.
+- **Save updates page state from the server response**, not from local state. `setPost(updated)` after `apiPatch` ensures `updated_at` and any server-applied normalizations (e.g. lowercase tag with the # stripped) round-trip into the UI. Avoids the bug where local state drifts from server state after a save.
+- **No optimistic UI on save in Chunk A.** The full round-trip is small (~100ms over localhost) and the user is editing one post at a time. Optimistic UI adds rollback complexity for no felt benefit at this scale. The trends page does have optimistic toggles, but those are list-mutating actions across many rows where the latency would feel different.
+
+### 2026-06-01 (Phase 4 Chunk G — Carousel slides strip)
+- **Two list concepts, not one.** Chunk F shipped carousels but kept the single-image list shape — slide 1 in the primary preview, slides 2..N tucked into the collapsed `"earlier renders"` expander. User correctly pointed out that's bad UX: you just generated a 5-slide carousel and 80% of it is hidden behind a click. Split into:
+  - **"Carousel slides"** (always visible strip, NEW): every slide of the most recent carousel batch as a `1/N, 2/N, ... N/N` thumbnail grid.
+  - **"Earlier renders"** (collapsed `<details>`, existing): only prior render *attempts* — older single renders, older carousel batches.
+- **Front-of-list cluster detection with a 60s window**, not explicit state. Considered tracking `currentCarouselIds` as React state set by the `/render-carousel` response, but that loses the carousel on page reload (user navigates away, comes back, strip is empty even though the batch is still in `assets`). Instead, `useMemo` over `assets` walks from index 0 forward, grouping consecutive `carousel_slide` assets whose `created_at` timestamps are within 60s of each other. Reload-safe, no extra state, decays correctly (re-render 60s+ later breaks the batch).
+- **Why 60s.** Real batches render at ~1-2s per slide (Stage 4 + Playwright + Supabase upload per slide). A 5-slide batch finishes well under 30s. 60s is generous enough that internal jitter never breaks a real batch, and short enough that two genuine carousel renders separated by a real human pause never merge into one fake mega-batch.
+- **Single-slide carousels don't show the strip.** `currentCarousel.length > 1` is the gate. A carousel post that Stage 4 collapsed into 1 slide (very short post) renders just like a single-image template — no point in a one-thumbnail strip.
+- **`older` slice starts at `currentCarousel.length || 1`** so slides 2..N never double-list. When no carousel is active, falls back to `slice(1)` — identical to pre-Chunk-G behavior. The change is purely additive for non-carousel post detail pages.
+
+### 2026-06-01 (Phase 4 Chunk F — one-click carousel rendering)
+- **Carousel renders are atomic and all-or-nothing.** Chunk D shipped with the visible bug that the slide indicator said "1 / 5" but only slide 1 ever rendered — the frontend always sent `slide_index=1` to `/render` and there was no surface to produce the other 4. New endpoint `POST /posts/{id}/render-carousel` loops every slide, uploads each, persists N `GeneratedAsset` rows in a single SQLAlchemy commit. If `render_png` or `storage.upload_png` raises mid-loop, no rows commit — there's no half-rendered partial-carousel state to clean up. Upload orphans (uploaded but no row) are acceptable: future cleanup job can prune by listing the bucket and reconciling against DB.
+- **Two endpoints, not one overloaded one.** Considered making `/render` return `GeneratedAssetRead | list[GeneratedAssetRead]` based on template type, but that's an ambiguous response shape and forces callers to switch on type. Cleaner to split: `/render` always returns exactly one asset (single template OR explicit slide of a carousel), `/render-carousel` always returns the full list. Frontend dispatches based on the selected template's name. This also leaves room to re-render just one bad slide (`/render` with `slide_index=N`) without forcing a full carousel re-roll.
+- **`render_post_carousel` validates the template is `carousel_slide`.** Auto-pick on a non-carousel post would resolve to a single-image template (e.g. `ai_automation` without metric → `insight_card` via Chunk D's smart fallback), and looping a single-image template across slide indexes 1..N would produce N identical PNGs. The validator raises `ValueError` → 400. Callers either explicitly pass the `carousel_slide` template_id or call from a `carousel`-category post where auto-pick resolves to it.
+- **Frontend dispatch is purely view-state, not server round-trip.** The `isCarouselRender` boolean is computed from `selectedTemplateId` + the in-memory `templates` list + `post.category`. No extra API call to figure out which endpoint to hit. Button label adapts live: pick the carousel template, see "Render carousel (5 slides)"; pick anything else, see plain "Render".
+- **Slide-1-first ordering in the response list.** `render_post_carousel` appends slides 1..N in render order, so `assets[0]` is slide 1. Frontend prepends the whole list to the existing assets state, so the visible preview (`assets[0]`) is slide 1 and the older-renders strip shows slides 2..N + any previous render history. Display-order, not reverse-chronological — matches reader intuition (the carousel starts at slide 1).
+
+### 2026-05-30 (Phase 4 Chunk E — Supabase Storage migration)
+- **Rendered assets moved from local disk to Supabase Storage.** `backend/storage/assets/` is gone; new PNGs land in the `autopost-assets` Supabase bucket. Why now (not at Phase 0): local disk was fine for Chunks A–D smoke iteration, but Phase 6 (LinkedIn publishing) needs an internet-fetchable URL for LinkedIn's media-upload API to ingest. Local `127.0.0.1:8000/static/assets/...` is unreachable from LinkedIn's servers. Object storage is the right shape, and we're already paying the Supabase tax (DB + Auth), so adding their Storage product is incremental — no new vendor.
+- **Bucket is public, not signed.** Renders are branded marketing visuals that end up on public LinkedIn anyway, so there's nothing to gate. Public buckets are CDN-fronted by Supabase (fast, cached) and bypass signed-URL round trips. Reads use the canonical public URL pattern `{SUPABASE_URL}/storage/v1/object/public/{bucket}/{path}`; writes are still authenticated via `SUPABASE_SERVICE_ROLE_KEY` (which bypasses storage RLS — same key already used for the DB).
+- **`supabase-py` (sync) wrapped in `asyncio.to_thread()`.** The official Python SDK is sync. Same pattern we already use for `trafilatura` in `intelligence/article.py`. No async-supabase needed; the upload is a single HTTP POST under the hood (no chained awaits to serialize).
+- **`image_path` shape unchanged on `GeneratedAsset`** — still the within-bucket key (`{post_id}/{asset_id}.png`). The bucket name lives in `SUPABASE_STORAGE_BUCKET`, not the column, so swapping vendors (S3, R2, etc.) is a URL-template change plus an upload-impl change — never a DB rewrite. `GeneratedAssetRead.image_url` is computed in the Pydantic schema, not stored.
+- **`StaticFiles` mount removed from `app/main.py`.** Backend no longer serves images. The dev-only `/static/assets` route is gone; the frontend's plain `<img>` tag now points at the Supabase CDN URL instead. Cross-origin still works (images don't trigger CORS).
+- **Lazy client init in `storage.py`.** A module-level `Client` is created on the first call, not at import time. Lets test environments without Supabase creds still import the renderer (currently irrelevant — no tests touch real Supabase — but it's the right shape for future test runners on machines without secrets).
+- **17 orphan `GeneratedAsset` rows + 2.2 MB local directory wiped after smoke.** Old rows pointed at paths that no longer exist anywhere; cleaner to start the post-Chunk-E history fresh than backfill smoke artifacts. `Post` table untouched (drafts persist; only the render-history table was reset).
+- **Phase 6 setup cost: zero.** LinkedIn's `/rest/images?action=initializeUpload` will accept these public URLs directly. No image-server proxy, no signed-URL refresh logic, no separate bucket policy work.
+
+### 2026-05-30 (Phase 4 Chunk D — Stage 4 visual extraction)
+- **Stage 4 added to the generator, FAST model, JSON output.** After Stage 3 finalizes hook/body/tags, Stage 4 reads the voiced text and returns `{pull_quote, metric_value, metric_label, carousel_slides[{text}]}`. Lives on `Post.extracts` (new nullable JSONB column). The original "all four templates restage the same hook" critique made this necessary — visual variety without content variety is a half-finished pipeline. Measured cost: ~700ms latency, ~130 output tokens, ~$0.0001 per draft on `llama-3.1-8b-instant`.
+- **Why JSONB, not 4 separate columns.** Adding `pull_quote_text VARCHAR`, `metric_value VARCHAR`, etc. would be tidy at first, then we'd need a migration every time we want a new per-template field (e.g. an OG-card subtitle, a quote attribution, a chart-card data series). JSONB pushes that off: new fields = code-only change. Trade-off is no DB-level constraints on extract shape; that's fine since the renderer + the parser already tolerate every weird shape the model can emit.
+- **Tolerant parser, not strict validation.** `_parse_visual_extract` accepts: bad JSON (returns empty extracts), non-dict JSON, missing fields, bare-string slides (the model occasionally returns `["slide one", "slide two"]` instead of `[{"text":...}]`), and orphaned `metric_value` without `metric_label`. Metric fields are co-required — if either is missing both null out, so the template never shows a number without context.
+- **Lazy backfill on first render.** Posts written before Chunk D have `extracts=NULL`. `render_post()` checks for this and runs `extract_visual_fields(voiced_text=post.body)` inline on the first render, persists, and proceeds. Adds ~700ms to that single render; subsequent renders skip. No batch migration needed — old posts upgrade silently as they're touched. Logged as `renderer.lazy_extract`.
+- **Hook is always the fallback for every extract field.** `pull_quote = extracts.pull_quote or hook`. `slide_text = extracts.carousel_slides[idx-1].text or hook`. If there are no slides, slides become `[{text: hook}]` (single-slide carousel). Posts with sparse or missing extracts render identically to pre-Chunk-D behavior. This is what makes lazy backfill safe: the renderer never assumes extracts exist.
+- **LLM decides carousel slide count (3-5), capped at 5.** The Stage 4 prompt instructs: slide 1 = hook (compressed if needed), middle slides = key beats one-per-slide, last slide = takeaway, each ≤14 words. The renderer reads the count from `extracts.carousel_slides` and surfaces it as `slide_total`; `slide_index` (1-based) picks the active one. `MAX_CAROUSEL_SLIDES = 5` is enforced in the parser to guard against runaway model output. The `/render` endpoint validates `slide_index` as `1 ≤ N ≤ 20` (the high end leaves headroom if we ever raise the cap).
+- **Smart auto-pick: ai_automation without a real metric falls back to insight_card.** Discovered mid-smoke that long hooks (~140 chars) overflow the metric_card fallback typography. Two fixes: (a) `default_template_name_for_post()` checks `extracts.metric_value` before auto-picking `metric_card`; if null, returns `insight_card` instead. (b) The metric_card fallback typography was tightened from `text-[112px] uppercase` to `text-[64px] sans bold` plus `|truncate(140)` so an explicit pick still renders without overflow. The explicit-pick fallback is more of a "safe failure mode" than the primary path — when extracts has a real metric (e.g. "$2,180/mo"), it goes to the proper metric branch with 160px display type.
+- **`run_pipeline()` return tuple changed from 4 to 5 elements** — now `(hook, body, tags, extracts, violations)`. Three test sites in `test_generator.py` were updated; the change was localized and additive.
+
+### 2026-05-30 (Phase 4 Chunk C — frontend image preview)
+- **Plain `<img>` for asset preview, not `next/image`.** The PNG is served by the backend at `http://127.0.0.1:8000/static/assets/...` — cross-origin from the Next.js dev server on `localhost:3000`. Using `next/image` would force a `remotePatterns` allowlist and route the request through Next.js's optimization pipeline, neither of which buys anything for a dev preview. Plain `<img>` works cross-origin (CORS doesn't restrict image loads), avoids the config friction, and keeps the preview as fast as the backend serves it. `eslint-disable-next-line @next/next/no-img-element` annotates the choice. When production hosting lands and assets move to object storage, this either stays as plain `<img>` (signed URLs work the same) or migrates to `next/image` once we configure `remotePatterns`.
+- **One parallel fetch on mount via `Promise.all`** for `/posts/{id}` + `/posts/{id}/assets` + `/templates`. Cheaper than three serial round-trips and keeps the loading state monolithic. New types live alongside the existing `Post`/`PostStatus`/`PostCategory` types in the same file — colocated because they're only consumed here.
+- **"Auto for category" is the picker default.** Backend's `_DEFAULT_TEMPLATE_BY_CATEGORY` policy is the right answer most of the time, so the dropdown opens to "Auto" and only sends `template_id` if the user explicitly picks an option. Empty string sentinel `""` in React state maps to "no template_id sent."
+- **Each render keeps the previous asset visible**, not replaced. The latest asset shows in the main preview slot; older renders collapse into a `<details>` thumbnail grid below. Lets the user A/B-compare renders during voice/visual iteration. Matches the backend choice to never overwrite — each `/render` call creates a new file + row.
+- **Render button is idempotent re-render once an asset exists** ("Re-render"), distinct label from "Render" first-time. Tiny UI affordance that signals state without taking up extra screen space.
+
+### 2026-05-30 (Phase 4 Chunks A + B — rendering layer)
+- **Singleton Chromium process owned by the FastAPI lifespan, not per-request.** Booting a fresh Chromium per render costs ~3 seconds. `app/rendering/playwright_runner.py` holds a module-level `_browser` started in `lifespan` and shut down on exit; every `html_to_png()` call opens a fresh browser context (cookies/cache isolated) but reuses the browser process. Verified end-to-end: `app.starting → scheduler.started → playwright.started → yield → playwright.stopped → scheduler shut down`.
+- **HTML + Tailwind via CDN, not a build step.** Each of the 4 templates pulls Tailwind from `https://cdn.tailwindcss.com` inside a `<script>` tag. Trade-off: render waits for the CDN response (`set_content(html, wait_until="networkidle")` handles that). Upside: adding a new template is one HTML file + one `templates` row, no Node toolchain in the backend, no build artifacts. If the CDN dependency ever becomes a problem (rate limits, offline dev), the swap is to a vendored Tailwind 4 CSS file — same class names work.
+- **One visual identity across all 4 templates — "minimal dark."** Black background, off-white serif headline, thin sans body, accent line above the brand strap. The four templates differ in *how the hook is staged*, not in palette/typography. Why: brand consistency in the LinkedIn feed beats per-card visual variety. Saved to memory as [[project-visual-style]] so future sessions know not to introduce per-category color accents.
+- **Brand name = "Nestwhirr."** Distinct from "Sacomt" (user's email domain) and "AutoPost" (project name). Configured via `BRAND_NAME` env var (default in `app/config.py` + `.env.example`). Rendered as the footer strap on every visual. Saved to memory as [[project-brand-name]].
+- **Renderer split into pure + DB-orchestration layers.** `render_html()` and `render_png()` are pure (no DB, no I/O). `render_post(session, post_id, template_id?)` is the DB orchestration. The pure layer is the testable seam — 17 tests in `tests/rendering/` exercise it with no real Chromium and no real DB. The DB layer is verified end-to-end manually (smoke script renders a real draft from Supabase).
+- **Default template = function of `post.category`**, not stored on the Post. `_DEFAULT_TEMPLATE_BY_CATEGORY` lives in `renderer.py` as a Python dict (founder_insight→insight_card, engineering_lesson→quote_card, ai_automation→metric_card, startup_opinion→quote_card, technical_humor→insight_card, carousel→carousel_slide). Caller can override with explicit `template_id` on `POST /render`. Rationale: the mapping is policy that changes with the brand identity, not data — keeping it in code (instead of a DB column) means changing the rule is a one-line edit. If the mapping ever needs per-account customization (multi-brand future), it migrates to a `default_template_id` column on `users` or `linkedin_accounts`.
+- **Each `/render` call creates a new `GeneratedAsset` row + new file.** No upsert, no overwrite. Old assets stay so the user can compare prior renders during voice/visual iteration. Files live at `backend/storage/assets/{post_id}/{asset_id}.png`. Cleanup deferred — disk pressure is not a real concern at MVP volume.
+- **Storage paths are relative (`{post_id}/{asset_id}.png`), not absolute.** Stored that way in `GeneratedAsset.image_path` so the dev/prod storage backend is swappable later — switching to S3/R2 only changes the URL prefix, not the column. `GeneratedAssetRead.image_url` is computed as `{APP_BASE_URL}/static/assets/{image_path}`.
+- **FastAPI `StaticFiles` mount at `/static/assets` is dev-only.** Backend binds to 127.0.0.1 per CLAUDE.md so it's not internet-exposed, but the mount has no auth — anyone with localhost access can fetch any rendered PNG. For production, the mount comes out and `image_url` will point at a signed object-storage URL. Comment in `app/main.py` documents this trade.
+- **`/api/v1/templates` listing endpoint added for future picker UI.** Even though Chunk C (frontend) hasn't shipped yet, the endpoint is wired now so the frontend can fetch the list and render a dropdown when Chunk C lands. Auth-gated like every other route.
+
+### 2026-05-28 (planning)
+- **MVP shape: full vertical slice** — every subsystem present but thin, so the whole pipeline is validated end-to-end before any subsystem is deepened.
+- **Approval flow: manual approval + scheduled auto-publish** — humans approve drafts in dashboard; APScheduler auto-publishes at the chosen `scheduled_at`. No fully autonomous publishing in MVP.
+- **Hosting: local-only during MVP** — Supabase free tier for managed Postgres; FastAPI, Next.js, Playwright, APScheduler all on localhost. Deploy later.
+- **Retrieval sources: RSS + HackerNews + Reddit** — GitHub Trending deferred (no official API, scraping fragile).
+- **Dashboard auth: Supabase Auth (email magic link)** — maps cleanly to multi-user later; minimal scaffolding for single-user now.
+- **LinkedIn auth: full 3-legged OAuth + refresh** — production-shape from start; works for any future company.
+- **Repo layout: monorepo with `/backend` + `/frontend`** — one developer, single coordinated lifecycle.
+- **Scheduler: APScheduler in-process with Postgres jobstore** — survives restarts via the jobstore; no separate worker process needed yet.
+
+### 2026-05-30 (Phase 3 Chunk C + voice iteration v2-v4 + length caps)
+- **Drafts UI lives at `/drafts` and `/drafts/[id]`.** Generation is fired from the list page via a small inline form (category dropdown + Generate button) — no separate "new draft" page. Detail is read-only; the full editor + approve/schedule flow is Phase 5. Used `React.use(params)` for Next.js 16's promise-shaped route params — confirmed against the bundled `node_modules/next/dist/docs/01-app/01-getting-started/03-layouts-and-pages.md` per the frontend AGENTS.md flag.
+- **Voice tuning iterated v1 → v2 → v3 → v4 in three migration rounds, no code redeploys.** The versioned `prompts` table is doing the work it was designed to do: every voice change is `op.execute("UPDATE … is_active=false") + op.bulk_insert(new_version_rows)`. Each round fixed a distinct failure mode (see `CHECKLIST.md` Phase 3 voice-iteration history for the full diff). High-level: v1's anchors taught the model to fabricate autobiography; v2 fixed that but went tweet-shaped; v3 fixed shape but went explainer-mode; v4 anchored against real founder positions (Fried, DHH, Lavingia, Willison) and added a "REACT, DON'T EXPLAIN" budget rule.
+- **The expanded `voice.py` banned-phrase list now catches 12 additional tells** ("is also worth noting", "sparked my interest", "this got me thinking", "one notable aspect", "valuable lesson for anyone", "i've seen many teams" + fake-authority prefix variants). These all appeared in real v3 output. Added in lockstep with the v4 prompt's NEVER-USE block so both layers agree.
+- **Length is now controlled at infrastructure level, not prompt level.** v4 prompts ask for 140-220 words and the model ignores it (~280-430 actual). Cut `VOICE_MAX_TOKENS` 800 → 350 in `generator.py` to enforce ceiling. Cut `MAX_CHARS` 8000 → 2500 in `article.py` so the model has less raw article material to recapitulate. Belt-and-suspenders: the prompt asks, the token cap enforces.
+- **Shipping at ~65-70% voice quality is intentional.** Further prompt iteration without real positive/negative training samples hits diminishing returns. Deferring v5 to Phase 8 (Hardening), where we'll have actual `posts` history and can mine "this one I liked, this one I didn't" pairs from the user's real review behavior. The mechanics (versioned prompts, audit trail in `ai_generations`, the two-model split) are exactly what we need to feed that loop later.
+- **Sample-driven future loop (deferred Phase 8 work):** when there are ~10 user-marked "good" drafts, write a v5 migration that swaps the public-founder anchors for the user's actual liked posts. This is the highest-leverage future lever — LLMs follow examples ~10x harder than abstract rules.
+
+### 2026-05-30 (Phase 3 Chunk B)
+- **Two-model split in the generator pipeline.** Stage 1 (angle synthesis) and Stage 2 (founder-voice rewrite) run on `GROQ_MODEL_PRIMARY` (`llama-3.3-70b-versatile`) because both require reasoning + nuance. Stage 3 (structured extract → `{hook, body, tags}` JSON) runs on `GROQ_MODEL_FAST` (`llama-3.1-8b-instant`) because it's mechanical pattern-matching with `response_format={"type":"json_object"}`. Per draft: 2 primary + 1 fast call (~10× cheaper than running everything on primary). The optional `polish_voice()` pass also uses fast.
+- **`run_pipeline()` is pure (no DB), `generate_draft()` is the orchestration.** This split is the testable seam — `tests/intelligence/test_generator.py` mocks `groq_client.chat` and asserts the stage/model/prompt_id propagation without touching Postgres. The DB orchestration (load active prompt, pick trends, fetch articles, persist Post, mark consumed) lives in `generate_draft()` and gets exercised live in Chunk C and beyond.
+- **Voice direction baked into 4 seeded prompts via anchor examples (LLM follows examples >> abstract rules).** Each prompt body is ~2K chars and contains: a one-line role definition, signature pattern (contrarian/confessional hook → ONE concrete specific → punchy reframe), 3 anchor example posts written in that pattern, and a strict rule list (banned phrases + structural constraints). Anchors are content-distinct from the trends so the model copies *rhythm*, not *substance*. Bumping a prompt = insert new row with same `name`, `version+1`, set old `is_active=false` — no code deploy needed.
+- **AI-tell strip runs between Stage 2 and Stage 3, not after Stage 3.** This is intentional: the deterministic stripper cleans the rewrite output *before* the extract model sees it, so the extracted `body` is already clean. Running it after Stage 3 would mean re-parsing post-JSON text and risking inconsistency between `hook`/`body`.
+- **Bad-JSON fallback in `_parse_extract`.** If Stage 3 returns non-JSON despite `response_format=json_object`, we fall back to `(first_line_of_voiced, voiced_full_text, [])` so a generation never hard-fails on a model glitch. Caller still gets a usable draft — at worst with empty tags.
+- **`/posts/generate` is synchronous** (returns the new draft inline, ~5-10s). Fine for MVP single-user. If user-perceived latency becomes a problem in Phase 5, the wrap is "queue as APScheduler one-shot job, return 202 + poll". No refactor needed in the generator itself.
+
+### 2026-05-30 (Phase 3 Chunk A)
+- **Groq SDK bumped 0.15.0 → 1.4.0** (web-verified latest on PyPI). The async surface — `AsyncGroq(...).chat.completions.create(model=, messages=, ...)` — is unchanged from 0.15, so no call-site rewrites later; we get current bug-fixes and the May 2026 API for free.
+- **`trafilatura==2.0.0` pinned** for article extraction. 2.0.0 has been the stable release since Dec 2024 — no major release pending. Used with `favor_precision=True`, `include_comments=False`, `include_tables=False` so output is dense narrative prose, not boilerplate or scraped UI fragments.
+- **`groq_client.chat()` is the single LLM entry point.** Every call writes one `ai_generations` row with `stage` (pipeline-phase label), full `input` and `output` text, token counts, and latency, regardless of success/failure. The audit layer's own failures are logged not raised — never block a generation on an audit-write hiccup. Retries: `tenacity.AsyncRetrying` with 4 attempts and exponential backoff (1–10s), filtered to `APIConnectionError` and `RateLimitError`. 4xx errors propagate immediately — retrying a malformed request or a bad API key is wasted spend.
+- **Article fetch is on-demand and isolated.** `fetch_article(url)` is the only public surface. Network: `httpx.AsyncClient` with 10s total timeout, polite UA, follow redirects. Extraction: `trafilatura.extract` runs in `asyncio.to_thread` because it's sync. Any failure (network, non-200, empty extract) returns `None` — generator falls back to `title + summary` for that trend. 8K char cap on the returned text (~2K tokens), so a long-form essay can't blow the context budget when we pass 3 picked trends at once.
+- **Tests don't touch the network or DB.** Groq client tests stub `_client()` and replace `_log_generation` with a recorder; article tests use `httpx.MockTransport` like the HN tests. 12 new tests in `backend/tests/intelligence/`, all passing in <2s.
+
+### 2026-05-30 (Phase 3 pre-implementation design decisions)
+- **Article body fetched on-demand at generation, not pre-fetched at retrieval.** Why: we generate 1-3 posts/day but retrieve ~50 new trends/day. Pre-fetching every trend's body wastes effort on ~95% we'll never use, plus storage bloat. Going on-demand keeps the `trends` table small and avoids paywall complications for items we never touch. Will use `trafilatura` (battle-tested HTML→clean-text library) with a graceful fallback to title+summary on fetch failure.
+- **LLM receives clean text, never raw HTML.** Parsing on our side (`app/intelligence/article.py`). LLMs are bad at HTML and the tokens are wasteful.
+- **Voice direction: contrarian + builder-grounded.** No samples from user; voice anchored via 2-3 fabricated example posts inside each prompt template (LLM follows examples >> abstract rules). Signature pattern: contrarian/confessional hook → one specific concrete detail → punchy takeaway. Prompts versioned in DB → no code deploys for voice tuning. Iteration loop: ship draft → user marks "generic" vs "good" → tune prompt → bump version.
+- **Phase 3 chunk split:** A (infra: Groq client + article extractor), B (voice + prompts + generator + endpoints), C (drafts queue UI). Full breakdown in `CHECKLIST.md`.
+
+### 2026-05-30 (Phase 2 Chunk C)
+- **`PATCH /api/v1/trends/{id}` added** with body `{consumed: bool}` — sets/clears `consumed_at`. Used by the frontend "Mark consumed / Mark unread" toggle. Phase 3's intelligence layer will also write to `consumed_at` when it picks a trend for a draft (programmatic, no API needed).
+- **Frontend `/trends` page** is the first non-trivial dashboard view: status filter (unconsumed / consumed / all), source filter (rss / hackernews / reddit), manual "Refresh now" → `POST /trends/refresh` with a fetch-summary banner, and optimistic-update consume toggle that removes the row from the active view on success. Page limit hardcoded at 100 (backend max 200) — pagination deferred until the unconsumed pool consistently exceeds 100 in practice.
+- **Long-term flooding is not a real concern**, contrary to the first-run impression. After the initial fetch, the `(source, source_id)` UniqueConstraint drops re-fetched items at the DB layer; realistic per-cron inserts are 15-35 (~50/day). Storage growth: ~75MB/year at 50K rows. Cleanup job (`DELETE WHERE consumed_at IS NULL AND fetched_at < NOW() - INTERVAL '180 days'`) deferred — add when there's actually something to clean up.
+- **Test suite** added at `backend/tests/retrieval/`: 27 tests, all passing. `test_dedupe.py` covers URL normalization (utm/fbclid stripping, case, trailing slash), title-similarity behavior, and dedupe order-preservation + cross-source collisions. `test_rss.py` and `test_hackernews.py` use `httpx.MockTransport` to stub the network — happy path, age cutoff, per-feed cap, 304 not-modified, single-feed failure isolation, dead/deleted HN items, fallback URL for text-post stories. Runs in <0.4s with no network/DB contact.
+- **`backend/pyproject.toml` created** for pytest config (`asyncio_mode = "auto"`, `asyncio_default_fixture_loop_scope = "function"`). First pyproject.toml in the project — keeps test config out of `requirements.txt`.
+
+### 2026-05-30 (post-Chunk B, RSS expansion)
+- **Two RSS feeds added to fill the only real signal gaps**: **Simon Willison** (`simonwillison.net/atom/everything/`) — independent AI commentary, multiple posts per day, the closest thing to "very current" without going to Twitter. **Latent Space** (`latent.space/feed`) — AI engineering newsletter by swyx, 2-3×/week, fills the "how AI actually works" angle that the corporate feeds (OpenAI, Hugging Face) and the engineering-ops feed (Pragmatic Engineer) miss. End state: 7 RSS feeds + HN = 180 fresh items per cron, verified.
+- **Trends table truncated** to remove the 1,837-row flood from the pre-cap first orchestrator run. Safe — no FK constraints reference `trends` (`posts.source_trend_ids` is a `UUID[]` array, not an FK). Phase 3 will start from a clean unconsumed pool.
+
+### 2026-05-30 (Phase 2 Chunk B)
+- **First Round Review dropped from RSS list** — both candidate URLs (`/rss` and `/feed.xml`) return 404; their RSS appears discontinued. RSS list now 5 feeds: Stratechery, Stripe, Pragmatic Engineer, OpenAI, Hugging Face. Verified live end-to-end.
+- **RSS per-feed cap + age cutoff** — Stratechery alone returned ~1,500 entries (full backlog) on first fetch, which flooded the unconsumed pool with years-old posts. Caps now: `MAX_ENTRIES_PER_FEED=25` (most recent) and `MAX_ENTRY_AGE=90 days` (skip stale). Why: the Intelligence layer (Phase 3) selects from unconsumed trends, so retrieval freshness matters.
+- **APScheduler started in FastAPI lifespan** — single AsyncIOScheduler, Postgres `SQLAlchemyJobStore` (sync, psycopg driver — the asyncpg URL is coerced via `app/scheduler/scheduler.py::_sync_url`). One job registered: `retrieval` on cron `RETRIEVAL_CRON` (default `0 */6 * * *`), `replace_existing=True`, `max_instances=1`, `coalesce=True` so a missed firing during downtime collapses into one catch-up run rather than backlogging.
+- **Orchestrator uses Postgres `INSERT ... ON CONFLICT DO NOTHING ... RETURNING id`** — gives accurate insert count across runs (rowcount on ON CONFLICT is driver-specific; RETURNING is portable).
+- **Trends API auth-gated** — both `POST /api/v1/trends/refresh` and `GET /api/v1/trends` require a Supabase JWT (same dep as the LinkedIn endpoints). Confirmed: unauthenticated requests return 403.
+
+### 2026-05-30 (Phase 2 Chunk A)
+- **Web-search-before-third-party-integration rule added to CLAUDE.md** — training-data drift on vendor APIs is the dominant source of waste; a 30-second search beats a 30-minute wrong path.
+- **RSS feed list locked at 6, post-verification:** Stratechery, First Round Review, Stripe blog, The Pragmatic Engineer (newsletter), OpenAI news, Hugging Face blog. Each URL confirmed live in May 2026.
+- **Anthropic dropped from RSS** — no official feed exists; only community GitHub scrapers (fragile). Replaced with **Hugging Face blog** (`huggingface.co/blog/feed.xml`, official RSS 2.0). Same "primary AI source" role, builder-flavored.
+- **Indie Hackers dropped** — no official RSS. HackerNews top/best stories already surface indie/builder signal, so we'd be double-counting. Easy to re-add later via a third-party feed if voice feels thin.
+- **Paul Graham dropped** — PG is a *style reference*, not a *trend source* (publishes ~4-6 essays/year). Per CLAUDE.md "retrieval = what's new" rule, his framing belongs in prompts (Phase 3), not in the retrieval pipeline.
+- **HackerNews source mix: top + best, not new.** Top 30 + best 20, ID-deduped. `newstories` is too noisy for a 6h cron and `beststories` is quality-weighted over 24-48h, which is the right window for a content pipeline that publishes daily.
+- **Reddit fetcher written but DISABLED in orchestrator** — Reddit Data API approval still pending. File ships fully implemented; activation = uncomment one import line in `orchestrator.py` (Chunk B) once approval lands.
+- **Dedupe = two layers**: DB `UniqueConstraint(source, source_id)` for across-run dedup; in-process `dedupe.py` for within-batch cross-source dedup (URL normalization + trigram-Jaccard title similarity at threshold 0.85). Order-sensitive — orchestrator must pass items in source-priority order (highest-quality first).
+
+### 2026-05-28 (post-planning, pre-Phase 1)
+- **Pivot to personal posting (single LinkedIn app)** — Community Management API requires a registered legal entity (LLC/Pvt Ltd/Corp), which we don't have. LinkedIn's algorithm favors personal posts over company-page posts anyway (5-10× reach), and the user has set up a LinkedIn account with the company name, which posts under `urn:li:person:...` but presents the company brand. **Single LinkedIn dev app, scopes `openid profile email w_member_social`.** The `linkedin_accounts.account_kind` column stays in the schema as an inert future-state for zero-rework cutover if we ever register a legal entity later.
+- **Database connection: Supabase Session Pooler URL (port 5432) for both migrations and app queries** — Transaction Pooler (port 6543) causes Alembic advisory-lock hangs; Direct connection is IPv6-only by default. Session Pooler is IPv4-safe, supports prepared statements, and works for persistent FastAPI connections.
+- **Two `.env` files, not one root file** — `backend/.env` for backend secrets, `frontend/.env.local` for `NEXT_PUBLIC_*` only. Matches both pydantic-settings defaults and Next.js conventions; prevents accidental leak of backend secrets to the browser bundle.
+- **LinkedIn endpoint = `/rest/posts` with `LinkedIn-Version: YYYYMM` header**, not the deprecated `/v2/ugcPosts`. Pinned via `LINKEDIN_API_VERSION` env var (currently `202604`).
+
+---
+
+## Database Schema
+
+All tables: `id UUID PRIMARY KEY DEFAULT gen_random_uuid()`, `created_at`, `updated_at`. Migrations via Alembic in `backend/alembic/`.
+
+| Table | Purpose | Key columns |
+|---|---|---|
+| `users` | Dashboard users (mirrors Supabase Auth) | `id`, `email`, `role` |
+| `linkedin_accounts` | OAuth token storage (Fernet-encrypted) | `id`, `user_id`, `account_kind` (`'personal'`/`'organization'`), `member_sub`, `org_urn` (nullable), `access_token`, `refresh_token`, `expires_at`, `scopes` |
+| `trends` | Ingested raw items | `id`, `source` (rss/hn/reddit), `source_id`, `title`, `url`, `summary`, `score`, `raw_payload jsonb`, `fetched_at`, `consumed_at` |
+| `prompts` | Versioned prompt templates | `id`, `name`, `category`, `body`, `version`, `is_active` |
+| `templates` | Visual templates registry | `id`, `name`, `category`, `html_path`, `thumbnail_url` |
+| `posts` | Drafts → scheduled → published | `id`, `category`, `body`, `hook`, `tags jsonb`, `source_trend_ids uuid[]`, `status`, `scheduled_at`, `published_at`, `linkedin_urn`, `error` |
+| `generated_assets` | Rendered images per post | `id`, `post_id`, `template_id`, `image_path`, `width`, `height`, `linkedin_asset_urn` |
+| `ai_generations` | Audit trail of every LLM call | `id`, `post_id`, `prompt_id`, `model`, `input`, `output`, `tokens_in`, `tokens_out`, `latency_ms`, `cost` |
+| `publishing_logs` | Every publish attempt | `id`, `post_id`, `attempt`, `status`, `linkedin_response jsonb`, `error`, `attempted_at` |
+| `analytics` | Time-series engagement snapshots | `id`, `post_id`, `impressions`, `likes`, `comments`, `shares`, `clicks`, `snapshot_at` |
+
+**`posts.status` lifecycle**: `draft → approved → scheduled → publishing → (published | failed)`. No state-skipping.
+
+---
+
+## API Contracts
+
+All under `/api/v1`. Auth: `Authorization: Bearer <supabase-jwt>` verified via Supabase JWKS in a FastAPI dependency.
+
+```
+GET    /auth/linkedin/start              → redirect to LinkedIn OAuth
+GET    /auth/linkedin/callback           → exchange code, store token, redirect to frontend
+GET    /auth/linkedin/status             → connected org info
+
+GET    /trends?status=unconsumed&limit=  → list ingested trends
+POST   /trends/refresh                   → kick off retrieval on demand
+PATCH  /trends/{id}                      → mark consumed / unread
+DELETE /trends/{id}                      → hard-delete one trend
+POST   /trends/bulk-delete               → {ids: [...]} → hard-delete up to 500
+
+POST   /posts/generate                   → {category, trend_ids?, template_id?} → creates draft
+GET    /posts?status=draft|scheduled|published
+GET    /posts/{id}
+PATCH  /posts/{id}                       → edit body/hook/tags
+POST   /posts/{id}/approve               → status=approved
+POST   /posts/{id}/unapprove             → approved → draft (Phase 9)
+POST   /posts/{id}/schedule              → {scheduled_at} → status=scheduled, registers APScheduler job
+POST   /posts/{id}/unschedule            → scheduled → approved, cancels APScheduler job (Phase 9)
+POST   /posts/{id}/render                → {template_id?, slide_index?, kind?} regenerate image; kind='ai_image' → Flux + brand-wrap
+POST   /posts/{id}/publish-now           → bypass scheduler
+POST   /posts/{id}/retry                 → failed → approved + publish inline
+DELETE /posts/{id}                       → gated on {draft, failed}
+
+GET    /templates                        → list visual templates
+GET    /analytics/posts/{id}             → time-series snapshots
+```
+
+---
+
+## Pipeline Definitions
+
+**Retrieval** (`backend/app/retrieval/`)
+Abstract `Fetcher.fetch() -> list[TrendItem]`. Orchestrator calls every fetcher, runs `dedupe.py` (URL hash + title trigram similarity), bulk-upserts into `trends`. Triggered by APScheduler cron + manual `/trends/refresh`.
+
+**Generation** (`backend/app/intelligence/generator.py`)
+1. Pick unconsumed trends (filtered by category if requested).
+2. Stage 1 — Groq `llama-3.3-70b-versatile`: synthesize an opinionated angle.
+3. Stage 2 — `voice.py` rewrite pass: founder voice, strip AI tells.
+4. Stage 3 — FAST model: extract `hook`, `body`, `tags` as structured JSON.
+5. Stage 4 — FAST model: extract per-template content (`pull_quote`, `metric_value/label`, `carousel_slides`) → `post.extracts` JSONB.
+6. Stage 5 — FAST model (Phase 10): extract a single 12-25 word visual prompt for Flux → `post.extracts.ai_image_prompt`. Brand-safe fallback string used if JSON is bad/empty.
+7. Persist `post` (status=draft) + `ai_generations` row. Mark source trends `consumed_at`.
+
+**Rendering** (`backend/app/rendering/renderer.py`)
+Two backends behind one entry: `render_post(..., kind: RenderKind = template)`.
+- **`kind=template` (default)** — pick template by `post.category` or explicit `template_id` → Jinja2 → Playwright PNG @ 1200×1200 → Supabase upload → `generated_assets` row (`render_kind='template'`). Carousel posts go through `render_post_carousel` for N slides in one transaction.
+- **`kind=ai_image`** (Phase 10) — resolve Stage-5 prompt (lazy-backfill if missing) → `app.rendering.ai_image.generate_image(prompt)` calls Cloudflare flux-1-schnell primary, Pollinations fallback → base64 data URI → render `ai_image_wrap.html` (1200×1200 brand-wrap with 800×800 inset) → Playwright PNG → Supabase upload → `generated_assets` row (`render_kind='ai_image'`).
+
+**Scheduler** (`backend/app/scheduler/`)
+APScheduler `AsyncIOScheduler` with `SQLAlchemyJobStore(url=DATABASE_URL)` — jobs survive process restarts. Started in FastAPI `lifespan` hook. Four job types:
+- `publish_post_job(post_id)` — registered on schedule
+- `retrieval_job()` — cron (default every 6h)
+- `analytics_collection_job()` — cron (hourly)
+- `cleanup_consumed_trends_job()` — cron (default daily 03:30); sweeps `trends` rows where `consumed_at < now() - TRENDS_CONSUMED_RETENTION_DAYS` (default 60)
+
+**Publishing** (`backend/app/publishing/publisher.py`)
+1. Load post + assets + the single connected `linkedin_account`.
+2. Refresh token if near expiry.
+3. Choose `author` URN by `account_kind`: `urn:li:person:<member_sub>` (MVP) or `urn:li:organization:<org_urn>` (future).
+4. Upload image: `POST /rest/images?action=initializeUpload` → upload binary to the returned URL → receive image asset URN.
+5. Build `/rest/posts` payload with `author`, `commentary`, `content.media[...]`. Include header `LinkedIn-Version: <LINKEDIN_API_VERSION>`.
+6. POST to `https://api.linkedin.com/rest/posts`. Persist `linkedin_urn`, set status=published.
+7. On failure: write `publishing_logs`, status=failed, exponential-backoff retry (max 3).
+
+---
+
+## Reusable Abstractions
+
+Day-one abstractions to keep future expansion cheap:
+
+- **`Fetcher` ABC** in `backend/app/retrieval/base.py` — adding GitHub Trending later = one new file
+- **`Publisher` ABC** in `backend/app/publishing/` — same interface for LinkedIn now, Twitter/X later
+- **`Template` registry** keyed by category — adding a new visual style = drop HTML + DB row
+- **Versioned `prompts` table** — prompt iteration without code changes
+- **`linkedin_accounts.org_urn`** — schema already supports multiple connected orgs
+
+---
+
+## Environment Variables
+
+Two files (never a root `.env`):
+- `backend/.env` — see `backend/.env.example` for the full list with empty values.
+- `frontend/.env.local` — see `frontend/.env.local.example`.
+
+Key backend groups:
+- **Database**: `DATABASE_URL` — **Supabase Session Pooler URL on port 5432** (not Transaction Pooler 6543).
+- **Supabase**: `SUPABASE_URL`, `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY`
+- **Groq**: `GROQ_API_KEY`, `GROQ_MODEL_PRIMARY`, `GROQ_MODEL_FAST`
+- **LinkedIn** (single app, personal posting): `LINKEDIN_CLIENT_ID`, `LINKEDIN_CLIENT_SECRET`, `LINKEDIN_REDIRECT_URI`, `LINKEDIN_SCOPES` (`openid,profile,email,w_member_social`), `LINKEDIN_API_VERSION` (`202604`)
+- **Reddit**: `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`, `REDDIT_USER_AGENT`
+- **App**: `APP_SECRET_KEY` (Fernet), `APP_BASE_URL`, `FRONTEND_BASE_URL`, `TIMEZONE`, `LOG_LEVEL`
+- **Cron**: `RETRIEVAL_CRON`, `ANALYTICS_CRON`, `TRENDS_CLEANUP_CRON` (default `30 3 * * *`)
+- **Retention**: `TRENDS_CONSUMED_RETENTION_DAYS` (default `60`)
+- **AI image (Phase 10)**: `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_AI_TOKEN`; tunable knobs `AI_IMAGE_MODEL` (default `@cf/black-forest-labs/flux-1-schnell`), `AI_IMAGE_STEPS=4`, `AI_IMAGE_WIDTH/HEIGHT=800`, `AI_IMAGE_TIMEOUT_SECONDS=30`. Pollinations fallback requires no auth.
+
+Frontend keys (`NEXT_PUBLIC_*` — safe to bundle into browser JS):
+- `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `NEXT_PUBLIC_API_BASE_URL`
+
+---
+
+## External APIs Used
+
+| API | Purpose | Auth | Rate notes |
+|---|---|---|---|
+| Groq | LLM generation | API key | Generous free tier |
+| LinkedIn UGC Posts | Publishing + media upload | 3-legged OAuth | Standard LinkedIn limits |
+| Reddit | Subreddit trend ingestion | OAuth (app + script) | 60 req/min |
+| HackerNews | Trend ingestion | None (public) | Polite scraping |
+| Cloudflare Workers AI | Flux image generation (Phase 10 primary) | Bearer token | 10k neurons/day free (~260 images) |
+| Pollinations | Flux image fallback (Phase 10) | None | Occasional outages — soft fallback only |
+| RSS feeds | Trend ingestion | None | Per-source |
+| Supabase | Auth + Postgres | URL + anon/service-role keys | Free tier |
+
+---
+
+## Completed Modules
+
+### Phase 5 Chunk C — Schedule path + queue pages ✅
+- `app/api/posts.py`:
+  - `MIN_SCHEDULE_LEAD_SECONDS = 60` module constant.
+  - `ScheduleRequest(BaseModel)` with `scheduled_at: datetime`.
+  - `POST /posts/{post_id}/schedule` — loads post → 404 if missing → 409 if `status not in {approved, scheduled}` → tags naive datetimes as UTC → 400 if within 60s of now → sets `scheduled_at` + flips to `scheduled` → commits → returns refreshed `PostRead`. Idempotent re-scheduling.
+- `frontend/components/SchedulePicker.tsx` — new client component. Props: `initialScheduledAt`, `scheduling`, `onSchedule(isoUtc)`, `onCancel`. `<input type="datetime-local">` in local TZ; default value is `now + 15min` rounded up to 5-min mark; mirrors the server's 60s gate with a 70s client buffer; shows the user's TZ label + a live relative-time hint; submit emits `Date(local).toISOString()`.
+- `frontend/app/drafts/[id]/page.tsx`:
+  - New state: `scheduling`, `schedulePickerOpen`, `scheduleError`.
+  - `schedulePost(isoUtc)` calls `apiPost<Post>('/posts/{id}/schedule', {scheduled_at: isoUtc})` → swaps page state.
+  - New Schedule button on the action bar (indigo primary) — enabled when status in `{approved, scheduled}`, label flips to **Reschedule** when already scheduled, opens the picker inline above the action row.
+  - Scheduled-time banner ("Scheduled for X. Publishes once Phase 6 worker is wired.") renders above the action bar whenever `status === 'scheduled'`.
+- `frontend/app/scheduled/page.tsx` — new page. Fetches `GET /posts?status=scheduled`, sorts ASC by `scheduled_at`, shows category badge + scheduled-status badge + datetime + `relativeFromNow()` chip, click-through to detail. Empty state guides the user back to drafts.
+- `frontend/app/published/page.tsx` — new page. Fetches `GET /posts?status=published`, sorts DESC by `published_at`. Each row links to a LinkedIn post URL constructed via `linkedinUrlFromUrn()` (null-safe for missing/malformed URNs). Empty state points at `/scheduled` for the publish dependency.
+- `frontend/app/page.tsx` — dashboard nav: replaced the "Coming soon" placeholder with separate **Scheduled** + **Published** cards, kept a thinner "Coming soon" stub pointing at Phases 6 + 7.
+- **Test suite still 118 passing in 1.93s.** No new backend tests — the schedule endpoint has one branch (the status gate) plus a time-validity check, both small enough that the repo's manual smoke pattern is the right fit. TypeScript clean. Live OpenAPI confirms PATCH /posts/{id}, POST approve, POST schedule all registered + auth-gated (unauthenticated returns 403). `/scheduled` and `/published` serve 200.
+- **Browser e2e pending** — user-driven check. Approve a draft → Schedule (~5 min from now) → status flips to `scheduled` + banner shows + /scheduled lists it next-up. Reschedule changes the time. /published is empty until Phase 6 ships the worker.
+
+### Phase 5 Chunk B — Approve flow + LinkedIn preview ✅
+- `app/api/posts.py::POST /posts/{post_id}/approve` — loads post → 404 if missing → 409 if `status != 'draft'` → flips to `PostStatus.approved` → commits → returns refreshed `PostRead`. Router enumeration confirms registration (8 routes total now: generate, list, get, patch, **approve**, render, render-carousel, list-assets).
+- `frontend/components/LinkedInPreview.tsx` — new client component. Props: `body`, `tags`, `imageUrl`, `carousel?`, `authorName?`, `authorTitle?`. Local `Avatar` helper renders initials in a sky→indigo gradient circle. Body in a `<p>` with `whitespace-pre-wrap break-words` to preserve generator line breaks. Hashtags inline in LinkedIn blue (`#0a66c2`), space-separated. Hero image is the single asset OR slide 1 of a carousel with a "1 / N" badge top-right + "swipe →" bottom-right. Stub reactions row (👍❤ + count + "X comments · Y reposts") and a 4-column Like/Comment/Repost/Send action bar for chrome.
+- `frontend/app/drafts/[id]/page.tsx`:
+  - New imports: `LinkedInPreview`.
+  - New state: `approving`, `approveError`.
+  - `approveDraft()` calls `apiPost<Post>('/posts/{id}/approve')`, swaps page state from the server response.
+  - New "LinkedIn preview" section between Visual and Hook. Reuses `latest?.image_url` and the existing `currentCarousel` memo (when N>1) to populate the preview. Author name derives from `session.user.email`.
+  - Action bar now has **Edit | Approve | Generate another**. Approve is the blue primary CTA. Both Edit and Approve gate on `status='draft'` with status-aware tooltips; Approve label transitions to "Approved ✓" post-flip. Approve errors render in a red banner above the action row.
+- **Test suite still 118 passing in 1.92s** (no new tests — approve endpoint has a single one-branch status gate, covered by the manual smoke pattern this repo uses for thin endpoints). TypeScript clean.
+- **Browser e2e pending** — user-driven check: open draft → preview shows latest image + full body + blue hashtags → click Approve → status flips to "approved", Edit + Approve both disable with new tooltips, "Approved ✓" label sticks.
+
+### Phase 5 Chunk A — Editing path ✅
+- `app/api/posts.py`:
+  - `normalize_tags(raw) -> list[str]` — module-level helper (lowercase, strip leading `#`, trim, dedupe order-preserving, cap at `MAX_TAGS=6`, truncate at `MAX_TAG_LENGTH=40`, tolerates non-strings).
+  - `PostUpdate(BaseModel)` — partial-update body with `hook?: str (1..512)`, `body?: str (≥1)`, `tags?: list[str]`. Pydantic raises 422 for invalid types/lengths.
+  - `PATCH /posts/{post_id}` — fetches post → 404 if missing → 409 if `status != 'draft'` (lifecycle gate) → applies non-None updates → commits → returns refreshed `PostRead`.
+- `frontend/components/DraftEditor.tsx` — new client component. Props: `initialHook`, `initialBody`, `initialTags`, `saving`, `onSave({hook, body, tags})`, `onCancel`. Internals: `useState` for each field, shared `useAutoResize` hook for textarea sizing, tag-chip input (Enter / comma to add, Backspace-on-empty pops last, × to remove), `useMemo` for dirty tracking, Save disabled until dirty + non-empty + not saving.
+- `frontend/app/drafts/[id]/page.tsx`:
+  - New state: `editing`, `saving`, `editError`.
+  - New imports: `DraftEditor`, `apiPatch`.
+  - `saveDraft(updates)` calls `apiPatch<Post>('/posts/{id}', updates)`, then `setPost(updated)` + exits edit mode; errors render above the editor.
+  - Read-only Hook + Body sections swap for `<DraftEditor>` when `editing=true`. Visual section + metadata always visible.
+  - New Edit button on the action bar — disabled with a lock-tooltip when `post.status !== 'draft'`.
+- `backend/tests/api/test_posts.py` — new file. 8 tests for `normalize_tags`: lowercase + hash strip, empty/whitespace drop, dedupe preserving first order, dedupe-after-hash-strip, cap at `MAX_TAGS`, truncate at `MAX_TAG_LENGTH`, skip non-strings, empty-input.
+- **Test suite: 118 passing in 1.91s** (up from 110 pre-Chunk-A). TypeScript clean (`npx tsc --noEmit`). Router enumeration confirms `PATCH /posts/{post_id}` registered.
+- **Browser e2e pending** — user-driven check: open a draft → Edit → tweak → Save → page refreshes with the changes. Non-draft post: Edit button visibly disabled.
+
+### Phase 4 Chunk F — One-click carousel rendering ✅
+- `app/rendering/renderer.py::render_post_carousel(session, *, post_id, template_id?, width?, height?) -> list[GeneratedAsset]` — loads Post, lazy-fills Stage-4 extracts if needed (same backfill semantics as `render_post`), validates the picked template is `carousel_slide`, loops over `extracts.carousel_slides` rendering + uploading each, persists N rows in a single commit, returns the list slide-1-first. Logs `renderer.carousel_rendered` with all asset IDs.
+- `app/api/posts.py::POST /posts/{id}/render-carousel` — new endpoint. Body `{template_id?: UUID}` (no `slide_index` — this is the all-slides path). Returns `list[GeneratedAssetRead]` (newest-slide-first within the carousel, i.e. slide-1-first). ValueError → 400 (covers missing post, missing template, wrong-template-family).
+- `frontend/app/drafts/[id]/page.tsx`:
+  - New `PostExtracts` type wired into `Post`.
+  - `isCarouselRender` derived: `true` if selected template's name is `carousel_slide` OR Auto-pick on a `carousel`-category post.
+  - `renderVisual` dispatches between `apiPost<GeneratedAsset[]>("/posts/{id}/render-carousel", ...)` and `apiPost<GeneratedAsset>("/posts/{id}/render", ...)`. Carousel response is prepended as a list; the latest asset stays at `assets[0]`.
+  - Button label adapts: "Render carousel (5 slides)" / "Rendering 5 slides…" / "Re-render carousel (5 slides)" for the carousel path; original "Render" / "Rendering…" / "Re-render" for single-image.
+- **End-to-end verified live**: rendered the 5-slide `ai_automation` post via `render_post_carousel` direct. 5 Supabase Storage POSTs all returned 200; one DB commit at the end; row-count delta = 5; total wall-clock ≈ 6 s for 5 slides. New route `POST /api/v1/posts/{post_id}/render-carousel` confirmed registered alongside the existing `/render`.
+- Tests: no changes needed (orchestration is verified by end-to-end smoke, not unit tests). Full suite still 110 passing in 1.78s.
+
+### Phase 4 Chunk E — Supabase Storage migration ✅
+- `requirements.txt` — `supabase==2.13.0` added; pulls in `storage3==0.11.3`, `gotrue==2.12.4`, `postgrest==0.19.3`, `realtime==2.30.1`, `supafunc==0.9.4`. Existing `pydantic` was bumped from 2.10.4 → 2.13.4 as a transitive — no API changes for our use.
+- `app/config.py` + `backend/.env.example` — new `SUPABASE_STORAGE_BUCKET: str = "autopost-assets"` setting (one new env var; bucket created by user in Supabase dashboard as a public bucket).
+- `app/rendering/storage.py` — new module. Lazy module-level `Client` guarded by `threading.Lock`; created from `SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY`. Public surface:
+  - `async upload_png(path, png_bytes) -> str` — uploads PNG, returns public URL, logs `supabase_storage.uploaded`
+  - `public_url(path) -> str` — constructs URL (no network) for the API schema layer
+- `app/rendering/renderer.py` — removed `ASSETS_DIR`, removed `mkdir` + `write_bytes`, added `from app.rendering import playwright_runner, storage`, replaced local write with `await storage.upload_png(rel_path, png_bytes)`. Asset row schema unchanged.
+- `app/api/posts.py` — `GeneratedAssetRead.image_url` now returns `storage.public_url(self.image_path)`; removed the now-unused `from app.config import settings` import.
+- `app/main.py` — dropped `StaticFiles` import, `ASSETS_DIR` import, `ASSETS_DIR.mkdir(...)`, and the `app.mount("/static/assets", ...)` block. Cleaner main.
+- **End-to-end verified live**: rendered the latest draft via the new pipeline (boot → Stage 4 cached → Playwright HTML→PNG → upload to Supabase). Storage POST returned 200; public URL HEAD returned 200 with `Content-Length: 145777`, `Content-Type: image/png`. CDN is serving from `mwgfigntlqmhtzcuslym.supabase.co`.
+- **Cleanup**: `DELETE FROM generated_assets` (17 stale rows) + `rm -rf backend/storage/assets` (2.2 MB). No data we cared about — pure smoke artifacts.
+- **Test suite still 110 passing in 1.80s.** No test changes needed; the pure-Jinja2 + context-shape tests don't touch storage, and `render_post()` orchestration is verified by end-to-end smoke rather than unit tests.
+
+### Phase 4 Chunk D — Stage 4 visual extraction ✅
+- `alembic/versions/e9f3c5b81d72_add_extracts_to_posts.py` — adds `posts.extracts JSONB NULL`. Applied to Supabase.
+- `app/models/post.py` — `extracts: Mapped[dict[str, Any] | None]` mapped column.
+- `app/intelligence/generator.py`:
+  - New constants: `VISUAL_EXTRACT_TEMPERATURE=0.2`, `VISUAL_EXTRACT_MAX_TOKENS=600`, `MAX_CAROUSEL_SLIDES=5`.
+  - New `_VISUAL_EXTRACT_SYSTEM` prompt (strict JSON output, "do NOT invent numbers", "each slide ≤14 words", "self-contained").
+  - New `_parse_visual_extract(raw) -> dict` (tolerant: bad JSON / non-dict / missing fields / bare-string slides / orphaned metric_value).
+  - New `_str_or_none()` helper.
+  - New `empty_extracts()` public helper (canonical empty shape).
+  - New `extract_visual_fields(*, voiced_text, prompt_id?, post_id?)` — public Stage 4 entry; used by both `run_pipeline()` and `render_post()` lazy backfill.
+  - `run_pipeline()` runs all 4 stages and returns `(hook, body, tags, extracts, violations)`.
+  - `generate_draft()` persists `extracts` on the new Post.
+- `app/rendering/renderer.py`:
+  - Imports `extract_visual_fields` from the generator (no circular import — generator doesn't import renderer).
+  - `default_context_for_post(post, *, slide_index=1)` now emits `pull_quote / metric_value / metric_label / slide_text / slide_number / slide_total` alongside the existing fields. Hook fallback for every missing extract.
+  - `default_template_name_for_post()` smart fallback: auto-picks `insight_card` (not `metric_card`) when the post has no real metric.
+  - `render_post()` accepts `slide_index: int = 1`; lazy-fills `extracts` if NULL by calling `extract_visual_fields(voiced_text=post.body)` and persisting before render.
+- Templates (all keep minimal-dark identity; only the content variable changes):
+  - `insight_card.html` — unchanged (already uses `{{ hook }}`, the correct centerpiece).
+  - `quote_card.html` — `{{ pull_quote|default(hook) }}` in the italic-serif h1.
+  - `metric_card.html` — `{% if metric_value %}` branch shows value at 160px + label at 30px; fallback shows hook at 64px with `|truncate(140)`.
+  - `carousel_slide.html` — `{{ slide_text|default(hook) }}` + `{{ slide_number }} / {{ slide_total }}` indicator + conditional "swipe →" affordance when not last slide.
+- `app/api/posts.py`:
+  - `PostRead` exposes `extracts: dict | None`.
+  - `RenderRequest` gains `slide_index: int = Field(default=1, ge=1, le=20)`.
+  - `POST /posts/{id}/render` forwards `slide_index` to the renderer.
+- `tests/intelligence/test_generator.py` — 13 new tests:
+  - `TestRunPipeline` updated (3 sites) for 5-tuple shape + asserts Stage 4 stage label + FAST model + `response_format=json_object`.
+  - New `TestParseVisualExtract` (9 tests): happy-path, bad JSON → empty, non-dict → empty, missing metric_label → drops metric_value, missing metric_value → drops metric_label, caps slides at MAX_CAROUSEL_SLIDES, tolerates bare-string slides, empty pull_quote → None, canonical empty shape.
+  - New `TestExtractVisualFields` (1 test): calls FAST model with JSON response_format and correct stage label.
+- `tests/rendering/test_renderer.py` — 10 new tests:
+  - `TestDefaultTemplateName` extended: with-metric → metric_card, without-metric → insight_card (both auto-pick paths), null-metric → insight_card.
+  - New `TestExtractsInContext` (7 tests): pull_quote fallback, metric passthrough, slide_text fallback, slide_index picking + clamping above/below.
+  - `TestRenderHtml` extended: metric_card uses `text-[160px]` branch when value present, falls back to `text-[64px]` when null, quote_card uses pull_quote in the centerpiece `<h1>`, carousel_slide uses slide_text + correct indicator.
+- **Test suite total: 110 passing in 1.71s** (up from 87 pre-Chunk-D, 0 network/DB/Chromium contact).
+- **Verified end-to-end against a fresh `ai_automation` draft.** Stage 4 returned a usable extracts JSON in ~700ms; auto-picker correctly degraded to `insight_card` because `metric_value` was null; carousel rendered 5 distinct slides via 5 separate `/render` calls; lazy backfill path was exercised on the prior (Chunk-B) draft that predated the column.
+
+### Phase 4 Chunk C — Frontend image preview ✅
+- `frontend/app/drafts/[id]/page.tsx` extended with a "Visual" section above the Hook section:
+  - Three-fetch parallel mount: `apiGet<Post>('/posts/{id}')` + `apiGet<GeneratedAsset[]>('/posts/{id}/assets')` + `apiGet<Template[]>('/templates')` via `Promise.all`.
+  - New types in-file: `TemplateCategory`, `Template`, `GeneratedAsset` (`image_url` field comes from the backend's `computed_field`).
+  - Layout: left column = square `<img>` preview of the latest asset (or dashed-border placeholder if none); right column = template picker dropdown (default "Auto for category", then 4 named options) + Render/Re-render button + meta line (template name · WxH · created_at) + inline error.
+  - "Open full size →" link beside the meta line opens the underlying URL in a new tab.
+  - Older renders collapse into a `<details>` strip with a thumbnail grid (3 cols mobile, 5 cols sm+).
+- TypeScript clean (`npx tsc --noEmit`).
+- Reachability: backend three new routes return 403 unauthenticated (auth gating works); `/drafts/{id}` page compiles + returns 200; static asset URL serves 200.
+- **Phase 4 complete pending user browser e2e** — clicking Render in the browser is the last unverified step.
+
+### Phase 4 Chunks A + B — Rendering layer ✅
+- `app/rendering/playwright_runner.py` — module-level singleton (`_playwright`, `_browser`) plus an `asyncio.Lock` guarding start/stop. `start()` is idempotent; `stop()` is safe if `start()` never ran. `html_to_png(html, *, width, height, device_scale_factor=2)` opens a throwaway context, sets HTML, waits for `networkidle` (covers the Tailwind CDN response), screenshots, closes context. Browser process reused.
+- `app/rendering/templates/` — 4 HTML files, all minimal-dark, Tailwind via CDN inline.
+  - `insight_card.html` — centered serif headline, eyebrow + accent line + brand strap
+  - `quote_card.html` — italic serif with oversized `&ldquo;` anchor
+  - `metric_card.html` — top-aligned uppercase bold sans display type
+  - `carousel_slide.html` — slide indicator (`{{ slide_number|default(1) }} / {{ slide_total|default(1) }}`) + serif headline + "swipe →" affordance when not last slide
+- `app/rendering/renderer.py`:
+  - `TEMPLATES_DIR` = `backend/app/rendering/templates/`, `ASSETS_DIR` = `backend/storage/assets/` (both resolved relative to file, CWD-independent)
+  - Jinja2 env with `autoescape` on (XSS-safe — hook with `<script>` becomes `&lt;script&gt;`)
+  - `_CATEGORY_LABELS: dict[PostCategory, str]` — human-readable eyebrow strings
+  - `_DEFAULT_TEMPLATE_BY_CATEGORY: dict[PostCategory, str]` — category → template-name fallback
+  - `default_template_name_for_post(post)`, `default_context_for_post(post)` — pure helpers
+  - `render_html(name, ctx)`, `render_png(name, ctx, *, width, height)` — pure (no DB)
+  - `_pick_template(session, post, template_id)` — explicit-id-or-default lookup
+  - `render_post(session, *, post_id, template_id?, width?, height?) -> GeneratedAsset` — full orchestration; writes file under `ASSETS_DIR/{post_id}/{asset_id}.png`, persists row, commits, refreshes, returns the row
+- `alembic/versions/d8e2f4a91c56_seed_templates.py` — bulk-inserts 4 templates (insight_card / quote_card / metric_card / carousel_slide). Applied to Supabase; verified 4 rows visible.
+- `app/api/posts.py` — two new endpoints (both auth-gated, error-translated to HTTP 400):
+  - `POST /api/v1/posts/{post_id}/render` (body `{template_id?}`) → `GeneratedAssetRead`
+  - `GET /api/v1/posts/{post_id}/assets` → newest-first list
+- `app/api/templates.py` — `GET /api/v1/templates` for the future picker (auth-gated).
+- `app/api/__init__.py` — templates router mounted.
+- `app/main.py` — `StaticFiles` mount at `/static/assets` → `ASSETS_DIR`, comment notes dev-only nature. Lifespan now boots/shuts `playwright_runner` alongside scheduler.
+- `app/config.py` + `backend/.env.example` — `BRAND_NAME=Nestwhirr` configured.
+- `tests/rendering/test_renderer.py` — 17 tests in 5 classes:
+  - `TestDefaultTemplateName` (3) — every PostCategory maps to an existing template file
+  - `TestDefaultContext` (4) — required keys, brand setting, category label, None-tags → []
+  - `TestRenderHtml` (5) — each of the 4 templates renders + hook + brand appear + autoescape catches `<script>`
+  - `TestRenderPng` (1) — monkeypatched `html_to_png` receives the rendered HTML + dims
+  - `TestPickTemplate` (4) — explicit id, default lookup, missing id → ValueError, missing default → ValueError
+- **Verified live:** `playwright install chromium` installed the headless shell (1.1MB ffmpeg + 77.5MB chromium); FastAPI lifespan boot order is `scheduler.started → playwright.started → yield → playwright.stopped → scheduler shut down`; all 4 new routes (`POST /render`, `GET /assets`, `GET /templates`, plus the static mount) live; end-to-end render of latest founder_insight draft produced a 153KB 1200×1200 PNG via the auto-picked insight_card template.
+- **Test suite total: 87 passing in 1.78s** (27 retrieval + 5 article + 7 groq_client + 14 voice + 13 generator + 17 rendering). No network, no DB, no real Chromium in any test.
+
+### Phase 3 Chunk C + voice iteration v2-v4 ✅ (Phase 3 complete)
+- `frontend/app/drafts/page.tsx` — protected client component. Status filter (draft / approved / scheduled / published / failed / all), inline "Generate a draft" form with category dropdown (4 generatable categories: founder_insight / engineering_lesson / ai_automation / startup_opinion), green flash banner with hook preview on successful generation, list of post cards with category + status colored badges + hook + hashtags. Empty state nudges toward the inline generate form.
+- `frontend/app/drafts/[id]/page.tsx` — read-only detail. Hook + body in pre-wrap (preserves the founder-voice line breaks), tags row below a divider, metadata block (source-trend count, post ID). "Generate another" CTA routes to a fresh draft in the same category. Uses Next.js 16's `params: Promise<{id}>` unwrapped via `React.use()`.
+- `frontend/app/page.tsx` — Drafts card replaces "Coming soon" placeholder; "Coming soon" downgraded to point at Phases 4-7.
+- **3 voice-iteration migrations** at `backend/alembic/versions/`:
+  - `f3b8a72c9d41_prompts_v2_reaction_style.py` — v1 (autobiography-prone) → v2 (reaction-style anchors + "you READ these, didn't DO them" guardrail)
+  - `a5d2b9e4f637_prompts_v3_length_sharpness.py` — v2 (tweet-shaped 40 words) → v3 (140-220 words, full paragraphs, sharp-takeaway rule)
+  - `b4e7c1f293a8_prompts_v4_real_anchors.py` — v3 (explainer drift) → v4 (real-voice anchors built from Jason Fried / DHH / Sahil Lavingia / Simon Willison's actual positions + "REACT, DON'T EXPLAIN" budget)
+- **`voice.py` banned-phrase list expanded** from 10 entries to 22, catching everything that slipped through v3 ("is also worth noting", "sparked my interest", "this got me thinking", "i've seen many teams", "one notable aspect", "valuable lesson for anyone", fake-authority prefix variants).
+- **Infrastructure-level length controls.** `generator.py` `VOICE_MAX_TOKENS` 800 → 350 enforces a ~220-word ceiling at the model level. `article.py` `MAX_CHARS` 8000 → 2500 stops the model from recapitulating long articles.
+- **Verified end-to-end by user in browser** across all 4 categories. Voice quality ~65-70% of target; further tuning deferred to Phase 8 with real generation samples.
+
+### Phase 3 Chunk B — Voice + prompts + generator + /posts API ✅
+- `app/intelligence/voice.py` — `strip_ai_tells(text)` deterministic regex pass (em-dash separator → period, closing-summary paragraph drop, 10 banned phrases stripped case-insensitively, whitespace tidying). Idempotent. Returns `(cleaned, violations)` so callers can decide whether to escalate. `polish_voice(text)` optional second LLM pass on `GROQ_MODEL_FAST` — called explicitly, not auto-triggered.
+- `alembic/versions/c7a4f1e8b2d3_seed_prompts.py` — data migration inserting 4 active v1 prompts (`founder_insight`, `engineering_lesson`, `ai_automation`, `startup_opinion`). Each body ~2K chars: signature pattern + 3 anchor examples (content-distinct from any real trend) + strict voice rules. Applied to Supabase; all 4 rows present.
+- `app/intelligence/generator.py` — 3-stage pipeline. `run_pipeline()` is pure LLM (no DB): Stage 1 angle (primary, T=0.85) → Stage 2 voice rewrite (primary, T=0.7) → `strip_ai_tells` → Stage 3 extract (FAST, T=0, json_object response_format) → `_parse_extract` with bad-JSON fallback. `generate_draft()` wraps it: load active prompt for category, pick up to 3 trends (caller-supplied IDs preserve order, otherwise unconsumed by score+freshness), enrich with `article.fetch_article` in parallel, persist `Post(status=draft)`, mark source trends `consumed_at`.
+- `app/api/posts.py` — three endpoints mounted at `/api/v1/posts` (all auth-gated):
+  - `POST /generate` (body `{category, trend_ids?}`) → runs generator, returns the new draft as `PostRead`.
+  - `GET ?status=&limit=` → newest-first list (max 200).
+  - `GET /{post_id}` → fetch one.
+- `app/api/__init__.py` — posts router added.
+- **Tests:** 27 new tests in `tests/intelligence/` (14 voice + 13 generator). Full suite **66 passing in 1.67s** (27 retrieval + 5 article + 7 groq_client + 14 voice + 13 generator). No network or DB contact in any test.
+- **Verified live:** backend boots, scheduler logs `jobs=['retrieval']`, all 3 `/posts` routes appear in OpenAPI, unauthenticated `GET /api/v1/posts` returns 403.
+
+### Phase 3 Chunk A — Intelligence infrastructure ✅
+- `backend/requirements.txt` — `groq` bumped to `1.4.0`, `trafilatura==2.0.0` added.
+- `app/intelligence/groq_client.py` — single `chat(stage, messages, model?, temperature?, max_tokens?, response_format?, post_id?, prompt_id?)` async entry point. Uses `tenacity.AsyncRetrying` (4 attempts, exp backoff 1–10s) restricted to `APIConnectionError` + `RateLimitError`; other errors propagate immediately. Every call (success or failure) writes one `ai_generations` row via `_log_generation`, which is wrapped in its own try/except so audit failures never break a generation. Token counts + latency captured from the Groq usage payload.
+- `app/intelligence/article.py` — `fetch_article(url) -> str | None` via httpx (10s timeout, polite UA, follow redirects) + `trafilatura.extract` (favor_precision, no comments/tables) executed in `asyncio.to_thread`. 8K char cap. Returns `None` on any failure mode so the Chunk B generator can fall back cleanly to title+summary.
+- `backend/tests/intelligence/` — 12 tests, all passing in <2s, no network or DB contact.
+  - `test_groq_client.py` (7) — happy path, default model fallback, response_format pass-through, response_format omission, non-retryable error propagates + still audits, retryable error then success (counts attempts + one audit row), missing API key raises.
+  - `test_article.py` (5) — extracts + strips boilerplate, non-200 → None, network error → None, unextractable HTML → None, truncation to MAX_CHARS.
+- **Verified:** full suite is 39 passing in <2s (27 Phase 2 + 12 Chunk A).
+
+### Phase 0 — Scaffolding ✅
+- Monorepo directory tree with all subsystem folders + tests
+- Four root docs (`CLAUDE.md`, `CONTEXT.md`, `CHECKLIST.md`, `INSTRUCTIONS.md`)
+- Root configs (`.gitignore`, `README.md`); `.env.example` lives in `backend/`
+- **Backend** (`backend/`): Python 3.12 venv, `requirements.txt`, FastAPI hello-world serving `/health` + `/`, `app/config.py` (pydantic-settings), `app/core/logging.py` (structlog), `app/db.py` (SQLAlchemy async engine + `Base`), Alembic async `env.py` configured
+- **Frontend** (`frontend/`): Next.js 16.2.6 + React 19.2 + Tailwind 4 + TypeScript + App Router scaffolded via `create-next-app`. `.env.local.example` written.
+
+**Verified:** backend boots and serves 200 on `/health`; frontend boots and serves 200 on `/`.
+
+### Phase 1 partial — Schema ✅
+- All 10 SQLAlchemy ORM models written under `backend/app/models/`, one file per table, exported via `app/models/__init__.py`
+- `app/models/base.py` defines `TimestampMixin`, `uuid_pk()`, and 7 enum types (UserRole, AccountKind, TrendSource, PostCategory, PostStatus, TemplateCategory, PublishingStatus)
+- Alembic autogenerate migration `ba1ce855d31a_initial_schema.py` created
+- `alembic upgrade head` applied successfully to Supabase via Session Pooler
+- **Verified in Supabase:** 11 tables (10 app + `alembic_version`) and 7 Postgres ENUM types in `public` schema, all empty
+
+### Phase 1 — Schema + Auth ✅ (complete, end-to-end verified)
+
+#### Backend auth
+- `app/core/security.py` — Fernet `encrypt`/`decrypt` + TTL-aware variant. APP_SECRET_KEY enforced as valid Fernet key.
+- `app/core/auth.py` — Supabase JWT verification via JWKS. PyJWKClient fetches and caches `{SUPABASE_URL}/auth/v1/.well-known/jwks.json` (TTL 1h) and verifies tokens with ES256/RS256/EdDSA depending on the project's signing key. Verifies signature, expiry, and `aud="authenticated"`. Optional HS256 fallback via `SUPABASE_JWT_SECRET` for legacy projects only. JIT-provisions the local `users` row on first call using `sub` and `email` claims.
+- `app/publishing/oauth.py` — LinkedIn OAuth 2.0 + OIDC client. State CSRF protection via Fernet-encrypted `{user_id, nonce, timestamp}` with 10-min TTL. Authorize URL builder + code exchange + refresh + userinfo fetch.
+- `app/api/auth_linkedin.py` — three endpoints under `/api/v1/auth/linkedin/`:
+  - `GET /start` (auth required) → returns `{authorize_url}` for the frontend to redirect to
+  - `GET /callback?code&state` (public, LinkedIn redirect target) → exchanges code, fetches userinfo, upserts `linkedin_accounts` row with `account_kind='personal'`, encrypted tokens; redirects to frontend with `?linkedin=connected` or `?linkedin=error&message=...`
+  - `GET /status` (auth required) → returns connection state for the dashboard
+- API router mounted at `/api/v1` from `app/api/__init__.py`
+- **Verified:** backend boots; OpenAPI shows the 3 new paths; unauthenticated `/start` returns 403; Fernet + state round-trip + tamper-detection all pass with the real APP_SECRET_KEY
+
+#### Frontend dashboard + auth
+- `frontend/lib/supabase.ts` — Supabase JS client (anon key, session persistence, URL hash detection for magic-link redirect)
+- `frontend/lib/api.ts` — `apiGet`/`apiPost` wrappers that attach the current Supabase access token as a Bearer header; `ApiError` typed exception
+- `frontend/components/auth-provider.tsx` — React context with session + `signOut`, subscribes to `supabase.auth.onAuthStateChange`
+- `frontend/app/login/page.tsx` — magic-link form using `signInWithOtp`, redirects to `/` once session arrives
+- `frontend/app/page.tsx` — protected dashboard wrapped in `<Suspense>` (for `useSearchParams`). Shows email, sign-out, LinkedIn connection card with status / Connect button, and success/error banner based on `?linkedin=` query param
+- `frontend/app/layout.tsx` — wraps the tree in `AuthProvider`, sets `bg-black text-zinc-100`, sets metadata
+
+#### End-to-end verified
+Magic link sign-in → dashboard → click Connect LinkedIn → LinkedIn consent → callback → `linkedin_accounts` row populated in Supabase with `account_kind='personal'`, encrypted tokens, `member_sub`, `display_name`, `expires_at`, `scopes`.
+
+### Phase 2 Chunk C — Trends UI + tests ✅ (Phase 2 complete)
+- `app/api/trends.py` — `PATCH /api/v1/trends/{trend_id}` added (consume toggle). Body: `TrendPatch(consumed: bool)`. Auth-gated like the other trends routes.
+- `frontend/lib/api.ts` — `apiPatch<T>(path, body)` helper added (Bearer auth + JSON Content-Type, error wrapping).
+- `frontend/app/trends/page.tsx` — protected client component. Two filter dropdowns (status, source), refresh button with summary banner, per-row consume toggle with optimistic UI. Source-coded badges (rss=blue, hackernews=orange, reddit=red). Empty state nudges the user toward "Refresh now."
+- `frontend/app/page.tsx` — dashboard now has a "Trends" card linking to `/trends` (replacing the old "Coming soon" placeholder for trends).
+- `backend/pyproject.toml` — pytest config (`asyncio_mode=auto`, `asyncio_default_fixture_loop_scope=function`, `testpaths=["tests"]`).
+- `backend/tests/retrieval/` — three test files, **27 tests, all passing in <0.4s**, no network or DB contact (httpx.MockTransport for HTTP stubs).
+  - `test_dedupe.py` — URL normalization, hash equivalence, title-similarity behavior, dedupe order + cross-source collision handling, configurable threshold
+  - `test_rss.py` — happy-path parse, age cutoff, per-feed cap, 304 not-modified, one-feed-failing-doesn't-break-batch
+  - `test_hackernews.py` — top + best dedup, skip dead/deleted/non-story, fallback URL for text-post stories, score capture
+- **Verified end-to-end:** backend boots with scheduler started + 3 trends routes in OpenAPI; frontend builds clean; `/` and `/trends` both serve 200; auth gate returns 403 unauthenticated; user manually verified the UI works (refresh, filter, consume toggle).
+
+### Phase 2 Chunk B — Orchestrator + scheduler + /trends endpoints ✅
+- `app/retrieval/orchestrator.py` — `run_retrieval()` calls enabled fetchers in source-priority order (RSS → HN), runs the batch through `dedupe()`, then bulk-inserts via `INSERT ... ON CONFLICT DO NOTHING ... RETURNING id`. Reddit fetcher import left commented out pending Data API approval. Returns `{fetched, deduped, inserted, per_source}` summary.
+- `app/scheduler/scheduler.py` — singleton `AsyncIOScheduler` with `SQLAlchemyJobStore` (sync URL coerced from the async one). `start_scheduler()` / `shutdown_scheduler()` called from `app/main.py::lifespan`. Tables auto-created in Supabase `public` on first run (`apscheduler_jobs`).
+- `app/scheduler/jobs.py` — `retrieval_job()` coroutine + `register_recurring_jobs()` that wires it to `CronTrigger.from_crontab(settings.RETRIEVAL_CRON)`. Job ID `"retrieval"`, replace_existing, max_instances=1, coalesce=True, misfire_grace_time=600s.
+- `app/main.py::lifespan` — now boots/shuts the scheduler around the app lifecycle. Startup log shows registered job IDs + timezone.
+- `app/api/trends.py` — two endpoints, both auth-gated via `get_current_user`:
+  - `POST /api/v1/trends/refresh` → runs the orchestrator synchronously, returns `RefreshResponse` (fetched/deduped/inserted/per_source).
+  - `GET /api/v1/trends?status={unconsumed|consumed|all}&source={rss|hackernews|reddit}&limit=N` → newest-first list, returns `list[TrendRead]`.
+- **Verified end-to-end:** orchestrator runs cleanly against real feeds → 90 RSS items (5 feeds × ~18 avg, post-cap) + 45 HN items (top30 + best20 dedup'd) → 135 items, 135 deduped (no cross-source collisions in this batch), 0 inserted on second run (DB dedup working). Backend boots; lifespan logs scheduler-started with `jobs=['retrieval']`; both endpoints return 403 unauthenticated and appear in OpenAPI.
+- **Known follow-up:** the first run (before the per-feed cap landed) flooded the `trends` table with ~1,837 rows including ancient backlog. They're harmless (will be left unconsumed) but pollute Phase 3 trend selection. Safe to `TRUNCATE trends` before Phase 3 to start from a clean slate.
+
+### Phase 2 Chunk A — Retrieval fetchers + dedupe ✅
+- `app/retrieval/base.py` — `Fetcher` ABC + `TrendItem` dataclass. Subclasses set `source: TrendSource` and implement `async fetch() -> list[TrendItem]`. Sources never touch the DB.
+- `app/retrieval/rss.py` — `RSSFetcher` using `httpx` (async fetch) + `feedparser` (parse, run in `asyncio.to_thread`). Polite `User-Agent`, in-memory per-feed ETag / Last-Modified cache, 6 feeds fetched in parallel via `asyncio.gather`. Locked list lives in `DEFAULT_FEEDS`.
+- `app/retrieval/hackernews.py` — `HackerNewsFetcher` against `hacker-news.firebaseio.com/v0`. Pulls top 30 + best 20 IDs, dedups by ID, fetches each item in parallel. Skips `dead`/`deleted` items and non-`story` types. Falls back to `news.ycombinator.com/item?id=…` when item has no external URL.
+- `app/retrieval/reddit.py` — `RedditFetcher` via PRAW in `asyncio.to_thread`. **Written but DISABLED** — to be left out of the Chunk B orchestrator import until Reddit Data API access is approved. 8 starter subreddits in `DEFAULT_SUBREDDITS`.
+- `app/retrieval/dedupe.py` — `dedupe(items)` collapses duplicates within a batch using normalized-URL hash + title trigram Jaccard. URL normalization strips utm_*/fbclid/gclid/ref/etc., lowercases host, drops trailing slash.
+- **Verified:** all five modules import cleanly; dedupe collapses 3 → 2 in a smoke test (same OpenAI URL with utm + trailing-slash variants vs distinct Stripe URL); URL normalization and title similarity behave as expected.
+
+## Pending Modules
+
+- Phases 5-8 (dashboard core, publishing+scheduler, analytics, hardening). See `CHECKLIST.md`.
+- Voice prompt v5 (sample-driven, anchored on actual user-liked drafts) is queued for Phase 8 Hardening — needs real generation history first.
+- Frontend UI for picking carousel slide N — Chunk C ships with template picker but always renders slide 1 for carousel. Phase 5 (editor) is the natural home: a prev/next or 1/2/3 slide selector beneath the preview. Backend already accepts `slide_index`.
+
+## Stack Versions (locked at Phase 0)
+
+| Layer | Choice | Version |
+|---|---|---|
+| Python | 3.12.12 | `backend/.python-version` |
+| FastAPI | 0.115.6 | |
+| SQLAlchemy | 2.0.36 (async) | |
+| Alembic | 1.14.0 | |
+| psycopg | 3.2.3 (binary) | |
+| asyncpg | 0.30.0 | used by Alembic async migrations |
+| APScheduler | 3.11.0 | |
+| Groq SDK | 1.4.0 | bumped from 0.15.0 at Phase 3 Chunk A |
+| trafilatura | 2.0.0 | article body extraction |
+| Playwright | 1.49.1 | `chromium` (installed via `playwright install`) |
+| structlog | 24.4.0 | |
+| cryptography | 44.0.0 | Fernet for token encryption |
+| Next.js | 16.2.6 | App Router |
+| React | 19.2.4 | |
+| TailwindCSS | 4.x | PostCSS-based (no `tailwind.config.js`) |
+| TypeScript | ^5 | |
+
+---
+
+## Known Limitations
+
+- **No company-page posting in MVP** — posts go to the user's personal account (which is branded with the company name). Re-evaluate after registering a legal entity + Community Management API approval; see Decisions / 2026-05-28 (post-planning).
+- Single LinkedIn dev app and single connected member account at MVP (schema supports multiple connections per user via `account_kind`).
+- No retry policy on retrieval failures yet (will add in Phase 2).
+- No image diffusion fallback (deferred — HTML/Playwright handles all MVP visuals).
+- Local-only — not yet deployed.
+
+---
+
+## Architectural Rationale (key tradeoffs)
+
+- **Why APScheduler in-process, not Celery?** APScheduler with a Postgres jobstore satisfies "scheduled publish" without adding a broker, worker process, or new container. The brief explicitly forbids overengineering and Celery here would be exactly that. Migrate later if job volume demands it.
+- **Why HTML/Playwright, not Stable Diffusion?** Brand consistency. Diffusion outputs drift visually post-to-post; templates render identical typography, spacing, and color palette every time. Also: free, fast, deterministic.
+- **Why Groq, not OpenAI/Anthropic?** Free tier covers expected MVP volume. Inference speed is excellent for high-frequency automation. Llama-3.3-70b is strong enough for founder-voice content with good prompting.
+- **Why Supabase, not self-hosted Postgres?** Managed backups, auth-as-a-service, and free tier remove infra work that doesn't differentiate the product.
+- **Why subsystems isolated as folders, not microservices?** Conway's law in reverse — folder boundaries enforce loose coupling without operational cost. If a subsystem needs to become a service later, the boundary already exists.

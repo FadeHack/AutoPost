@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ hook|truncate(60) }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html, body { background: #000; }
+      .serif { font-family: ui-serif, Georgia, "Times New Roman", serif; }
+      .sans  { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body class="m-0 p-0">
+    <div class="w-[1200px] h-[1200px] bg-black text-zinc-100 flex flex-col justify-between px-24 py-24">
+
+      <!-- Category eyebrow -->
+      <div class="sans text-zinc-500 uppercase tracking-widest text-sm">
+        {{ category_label }}
+      </div>
+
+      <!-- Quote (pull-quote from Stage 4, falls back to hook) -->
+      <div class="flex-1 flex flex-col justify-center">
+        <div class="serif text-zinc-700 text-[160px] leading-none mb-2 select-none">&ldquo;</div>
+        <h1 class="serif italic text-zinc-50 text-6xl leading-snug tracking-tight pl-2">
+          {{ pull_quote|default(hook) }}
+        </h1>
+      </div>
+
+      <!-- Brand strap -->
+      <div>
+        <div class="w-16 h-px bg-zinc-600 mb-6"></div>
+        <div class="sans text-zinc-400 uppercase tracking-widest text-sm">
+          {{ brand_name }}
+        </div>
+      </div>
+
+    </div>
+  </body>
+</html>

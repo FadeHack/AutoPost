@@ -1,0 +1,13 @@
+"""Top-level API router. Sub-routers are mounted here so `app/main.py` only includes one."""
+
+from fastapi import APIRouter
+
+from app.api import auth_linkedin, posts, templates, trends
+
+api_router = APIRouter(prefix="/api/v1")
+api_router.include_router(auth_linkedin.router)
+api_router.include_router(trends.router)
+api_router.include_router(posts.router)
+api_router.include_router(templates.router)
+
+__all__ = ["api_router"]
