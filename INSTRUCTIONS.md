@@ -119,6 +119,47 @@ Dashboard: http://localhost:3000
 
 ---
 
+## Connecting Bluesky (one-time)
+
+Bluesky uses an **App Password** rather than OAuth — the atproto Python SDK is pre-1.0 and still session-based.
+
+1. On Bluesky web → **Settings → Privacy and security → App passwords** → "Add app password". Label it "Nestwhirr". Copy the generated `xxxx-xxxx-xxxx-xxxx` string immediately (Bluesky only shows it once).
+2. On the dashboard → **Bluesky** section → **Connect Bluesky** → enter handle (e.g. `nestwhirr.bsky.social`) + the app password.
+3. The backend calls `Client.login(...)` against the AT Protocol to validate before persisting. Success returns the connected DID. Both handle + password are stored in `bluesky_accounts`, the password Fernet-encrypted.
+4. Verify in the DB:
+   ```sql
+   SELECT user_id, handle, did, display_name FROM bluesky_accounts;
+   ```
+
+Rotate the app password by revoking on bsky.app and reconnecting — the connect endpoint upserts on `(user_id, handle)`.
+
+---
+
+## Connecting Mastodon (one-time)
+
+Mastodon is **federated** — every instance is its own server, so there's no central app to pre-register. The backend registers an OAuth client on your instance on the fly at connect time. Nothing to set up beforehand beyond the env vars below.
+
+Env (already defaulted in `backend/.env.example`):
+- `MASTODON_REDIRECT_URI=http://127.0.0.1:8000/api/v1/auth/mastodon/callback`
+- `MASTODON_CLIENT_NAME=Nestwhirr AutoPost`
+- `MASTODON_SCOPES=read write`
+
+Steps:
+1. On the dashboard → **Mastodon** section → **Connect Mastodon** → enter your instance (e.g. `mastodon.social` or `hachyderm.io`).
+2. Backend calls `POST {instance}/api/v1/apps` to register a client, then redirects you to that instance's `/oauth/authorize`. Approve there.
+3. On callback the backend exchanges the code, calls `verify_credentials`, and persists the Fernet-encrypted access token in `mastodon_accounts`. You're bounced back with a success banner.
+4. Verify in the DB:
+   ```sql
+   SELECT user_id, instance_url, handle, display_name FROM mastodon_accounts;
+   ```
+
+Notes:
+- Mastodon access tokens **don't expire** by default and no refresh token is issued, so there's no day-60 reconnect cycle like LinkedIn. If a token is revoked instance-side, reconnect.
+- The per-instance `client_id`/`client_secret` are not stored — they ride inside the encrypted OAuth `state` and are discarded after callback.
+- **Char limit reality:** Mastodon caps posts at 500 chars, but the canonical draft body is LinkedIn-shaped (~1100–1600 chars). Until Phase 12's per-platform prompt matrix lands, a Mastodon target on a normal draft will **fail the orchestrator's 500-char gate** with a clear error (this is expected). A hand-shortened ≤500-char draft publishes fine.
+
+---
+
 ## Common Operations
 
 (These will work as the relevant phase lands. Currently Phase 0 — only health-check works.)
