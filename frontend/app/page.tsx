@@ -4,13 +4,27 @@ import { Suspense, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
-import { ApiError, apiGet } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPost } from "@/lib/api";
 
 type LinkedInStatus = {
   connected: boolean;
   account_kind: string | null;
   display_name: string | null;
   expires_at: string | null;
+};
+
+type BlueskyStatus = {
+  connected: boolean;
+  handle: string | null;
+  did: string | null;
+  display_name: string | null;
+};
+
+type MastodonStatus = {
+  connected: boolean;
+  instance_url: string | null;
+  handle: string | null;
+  display_name: string | null;
 };
 
 type TokenExpiry = {
@@ -60,9 +74,27 @@ function Dashboard() {
   const [statusLoading, setStatusLoading] = useState(true);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState("");
+  // Bluesky uses App Password (no OAuth) — inline form vs LinkedIn redirect.
+  const [bskyStatus, setBskyStatus] = useState<BlueskyStatus | null>(null);
+  const [bskyLoading, setBskyLoading] = useState(true);
+  const [bskyFormOpen, setBskyFormOpen] = useState(false);
+  const [bskyHandle, setBskyHandle] = useState("");
+  const [bskyPassword, setBskyPassword] = useState("");
+  const [bskyConnecting, setBskyConnecting] = useState(false);
+  const [bskyError, setBskyError] = useState("");
+  // Mastodon is federated — full OAuth, but the user must name their instance
+  // first (we register an app on it server-side, then redirect to authorize).
+  const [mastoStatus, setMastoStatus] = useState<MastodonStatus | null>(null);
+  const [mastoLoading, setMastoLoading] = useState(true);
+  const [mastoFormOpen, setMastoFormOpen] = useState(false);
+  const [mastoInstance, setMastoInstance] = useState("");
+  const [mastoConnecting, setMastoConnecting] = useState(false);
+  const [mastoError, setMastoError] = useState("");
 
   const linkedInResult = searchParams.get("linkedin");
   const linkedInMessage = searchParams.get("message");
+  const mastodonResult = searchParams.get("mastodon");
+  const mastodonMessage = searchParams.get("message");
 
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
@@ -76,6 +108,90 @@ function Dashboard() {
       .catch((e) => setError(e instanceof ApiError ? e.body : (e as Error).message))
       .finally(() => setStatusLoading(false));
   }, [session, linkedInResult]);
+
+  useEffect(() => {
+    if (!session) return;
+    setBskyLoading(true);
+    apiGet<BlueskyStatus>("/auth/bluesky/status")
+      .then(setBskyStatus)
+      .catch(() => setBskyStatus({ connected: false, handle: null, did: null, display_name: null }))
+      .finally(() => setBskyLoading(false));
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    setMastoLoading(true);
+    apiGet<MastodonStatus>("/auth/mastodon/status")
+      .then(setMastoStatus)
+      .catch(() =>
+        setMastoStatus({
+          connected: false,
+          instance_url: null,
+          handle: null,
+          display_name: null,
+        })
+      )
+      .finally(() => setMastoLoading(false));
+  }, [session, mastodonResult]);
+
+  const connectMastodon = async () => {
+    setMastoConnecting(true);
+    setMastoError("");
+    try {
+      const { authorize_url } = await apiGet<{ authorize_url: string }>(
+        `/auth/mastodon/start?instance=${encodeURIComponent(mastoInstance.trim())}`
+      );
+      window.location.href = authorize_url;
+    } catch (e) {
+      setMastoError(e instanceof ApiError ? e.body : (e as Error).message);
+      setMastoConnecting(false);
+    }
+  };
+
+  const disconnectMastodon = async () => {
+    if (!confirm("Disconnect Mastodon? Any scheduled Mastodon publishes will fail."))
+      return;
+    try {
+      await apiDelete("/auth/mastodon/disconnect");
+      setMastoStatus({
+        connected: false,
+        instance_url: null,
+        handle: null,
+        display_name: null,
+      });
+    } catch (e) {
+      setMastoError(e instanceof ApiError ? e.body : (e as Error).message);
+    }
+  };
+
+  const connectBluesky = async () => {
+    setBskyConnecting(true);
+    setBskyError("");
+    try {
+      const res = await apiPost<BlueskyStatus>("/auth/bluesky/connect", {
+        handle: bskyHandle.trim(),
+        app_password: bskyPassword,
+      });
+      setBskyStatus(res);
+      setBskyFormOpen(false);
+      setBskyHandle("");
+      setBskyPassword("");
+    } catch (e) {
+      setBskyError(e instanceof ApiError ? e.body : (e as Error).message);
+    } finally {
+      setBskyConnecting(false);
+    }
+  };
+
+  const disconnectBluesky = async () => {
+    if (!confirm("Disconnect Bluesky? Any scheduled Bluesky publishes will fail.")) return;
+    try {
+      await apiDelete("/auth/bluesky/disconnect");
+      setBskyStatus({ connected: false, handle: null, did: null, display_name: null });
+    } catch (e) {
+      setBskyError(e instanceof ApiError ? e.body : (e as Error).message);
+    }
+  };
 
   const connect = async () => {
     setConnecting(true);
@@ -119,6 +235,17 @@ function Dashboard() {
           <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
             LinkedIn error:{" "}
             <span className="font-mono text-xs">{linkedInMessage}</span>
+          </div>
+        )}
+        {mastodonResult === "connected" && (
+          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
+            Mastodon connected.
+          </div>
+        )}
+        {mastodonResult === "error" && (
+          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
+            Mastodon error:{" "}
+            <span className="font-mono text-xs">{mastodonMessage}</span>
           </div>
         )}
         {expiry && expiry.level !== "ok" && (
@@ -194,6 +321,164 @@ function Dashboard() {
           )}
           {error && (
             <p className="text-red-400 text-xs mt-4 font-mono break-all">{error}</p>
+          )}
+        </section>
+
+        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
+          <h2 className="text-lg font-semibold mb-4">Bluesky</h2>
+          {bskyLoading ? (
+            <p className="text-sm text-zinc-500">Loading status…</p>
+          ) : bskyStatus?.connected ? (
+            <div className="space-y-3">
+              <p className="text-sm">
+                Connected as{" "}
+                <span className="font-medium">
+                  @{bskyStatus.handle}
+                </span>
+                {bskyStatus.display_name && (
+                  <span className="text-zinc-500"> ({bskyStatus.display_name})</span>
+                )}
+              </p>
+              <p className="text-xs text-zinc-500 font-mono break-all">
+                DID: {bskyStatus.did}
+              </p>
+              <button
+                onClick={disconnectBluesky}
+                className="text-xs text-zinc-400 hover:text-white underline"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : bskyFormOpen ? (
+            <div className="space-y-3">
+              <p className="text-xs text-zinc-500">
+                Bluesky uses an app password, not OAuth. Generate one at{" "}
+                <a
+                  href="https://bsky.app/settings/app-passwords"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="underline hover:text-white"
+                >
+                  bsky.app/settings/app-passwords
+                </a>.
+              </p>
+              <input
+                type="text"
+                placeholder="handle (e.g. nestwhirr.bsky.social)"
+                value={bskyHandle}
+                onChange={(e) => setBskyHandle(e.target.value)}
+                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm"
+              />
+              <input
+                type="password"
+                placeholder="app password (xxxx-xxxx-xxxx-xxxx)"
+                value={bskyPassword}
+                onChange={(e) => setBskyPassword(e.target.value)}
+                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm font-mono"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={connectBluesky}
+                  disabled={bskyConnecting || !bskyHandle.trim() || !bskyPassword}
+                  className="rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200 disabled:opacity-50"
+                >
+                  {bskyConnecting ? "Connecting…" : "Save"}
+                </button>
+                <button
+                  onClick={() => {
+                    setBskyFormOpen(false);
+                    setBskyError("");
+                  }}
+                  className="rounded border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setBskyFormOpen(true)}
+              className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200"
+            >
+              Connect Bluesky
+            </button>
+          )}
+          {bskyError && (
+            <p className="text-red-400 text-xs mt-4 font-mono break-all">
+              {bskyError}
+            </p>
+          )}
+        </section>
+
+        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
+          <h2 className="text-lg font-semibold mb-4">Mastodon</h2>
+          {mastoLoading ? (
+            <p className="text-sm text-zinc-500">Loading status…</p>
+          ) : mastoStatus?.connected ? (
+            <div className="space-y-3">
+              <p className="text-sm">
+                Connected as{" "}
+                <span className="font-medium">
+                  @{mastoStatus.handle}
+                </span>
+                {mastoStatus.display_name && (
+                  <span className="text-zinc-500"> ({mastoStatus.display_name})</span>
+                )}
+              </p>
+              <p className="text-xs text-zinc-500 font-mono break-all">
+                {mastoStatus.instance_url}
+              </p>
+              <button
+                onClick={disconnectMastodon}
+                className="text-xs text-zinc-400 hover:text-white underline"
+              >
+                Disconnect
+              </button>
+            </div>
+          ) : mastoFormOpen ? (
+            <div className="space-y-3">
+              <p className="text-xs text-zinc-500">
+                Mastodon is federated — enter your home instance. We register an
+                app on it, then redirect you to authorize.
+              </p>
+              <input
+                type="text"
+                placeholder="instance (e.g. mastodon.social)"
+                value={mastoInstance}
+                onChange={(e) => setMastoInstance(e.target.value)}
+                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={connectMastodon}
+                  disabled={mastoConnecting || !mastoInstance.trim()}
+                  className="rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200 disabled:opacity-50"
+                >
+                  {mastoConnecting ? "Redirecting…" : "Authorize"}
+                </button>
+                <button
+                  onClick={() => {
+                    setMastoFormOpen(false);
+                    setMastoError("");
+                  }}
+                  className="rounded border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button
+              onClick={() => setMastoFormOpen(true)}
+              className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200"
+            >
+              Connect Mastodon
+            </button>
+          )}
+          {mastoError && (
+            <p className="text-red-400 text-xs mt-4 font-mono break-all">
+              {mastoError}
+            </p>
           )}
         </section>
 

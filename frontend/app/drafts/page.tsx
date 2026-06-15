@@ -22,6 +22,15 @@ type PostCategory =
   | "technical_humor"
   | "carousel";
 
+// Currently-implemented publishers. Mastodon/Threads/Instagram land in Phase 11 B–D.
+type GenPlatform = "linkedin" | "bluesky" | "mastodon";
+
+const GEN_PLATFORMS: { id: GenPlatform; label: string }[] = [
+  { id: "linkedin", label: "LinkedIn" },
+  { id: "bluesky", label: "Bluesky" },
+  { id: "mastodon", label: "Mastodon" },
+];
+
 type Post = {
   id: string;
   category: PostCategory;
@@ -81,6 +90,7 @@ function DraftsPage() {
   const [generating, setGenerating] = useState(false);
   const [statusFilter, setStatusFilter] = useState<PostStatus | "all">("draft");
   const [genCategory, setGenCategory] = useState<PostCategory>("founder_insight");
+  const [genPlatforms, setGenPlatforms] = useState<GenPlatform[]>(["linkedin"]);
   const [error, setError] = useState("");
   const [flash, setFlash] = useState("");
 
@@ -124,12 +134,17 @@ function DraftsPage() {
   };
 
   const generate = async () => {
+    if (genPlatforms.length === 0) {
+      setError("Pick at least one platform.");
+      return;
+    }
     setGenerating(true);
     setError("");
     setFlash("");
     try {
       const newPost = await apiPost<Post>("/posts/generate", {
         category: genCategory,
+        platforms: genPlatforms,
       });
       setFlash(`Generated: ${newPost.hook.slice(0, 80)}`);
       await fetchPosts();
@@ -138,6 +153,12 @@ function DraftsPage() {
     } finally {
       setGenerating(false);
     }
+  };
+
+  const toggleGenPlatform = (p: GenPlatform) => {
+    setGenPlatforms((prev) =>
+      prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p],
+    );
   };
 
   if (authLoading || !session) {
@@ -162,8 +183,8 @@ function DraftsPage() {
       </header>
 
       <div className="max-w-5xl mx-auto space-y-6">
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-5">
-          <h2 className="text-sm font-semibold mb-3 text-zinc-300">
+        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-5 space-y-3">
+          <h2 className="text-sm font-semibold text-zinc-300">
             Generate a draft
           </h2>
           <div className="flex flex-wrap items-center gap-3">
@@ -178,17 +199,39 @@ function DraftsPage() {
                 </option>
               ))}
             </select>
+            <div className="flex flex-wrap gap-2">
+              {GEN_PLATFORMS.map((p) => {
+                const on = genPlatforms.includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    onClick={() => toggleGenPlatform(p.id)}
+                    className={
+                      "rounded border px-3 py-1.5 text-xs font-medium " +
+                      (on
+                        ? "border-emerald-700 bg-emerald-950/40 text-emerald-200"
+                        : "border-zinc-700 text-zinc-400 hover:text-white")
+                    }
+                  >
+                    {on ? "✓ " : ""}
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
             <button
               onClick={generate}
-              disabled={generating}
+              disabled={generating || genPlatforms.length === 0}
               className="rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200 disabled:opacity-50"
             >
               {generating ? "Generating…" : "Generate draft"}
             </button>
-            <span className="text-xs text-zinc-500">
-              Pulls the top unconsumed trends, runs the 3-stage pipeline (~5–10s).
-            </span>
           </div>
+          <p className="text-xs text-zinc-500">
+            One draft, one editorial cycle. Non-LinkedIn platforms get a
+            compressed variant generated alongside so each ships in its own
+            shape at publish time.
+          </p>
         </section>
 
         <section className="flex flex-wrap items-center gap-3 text-sm">

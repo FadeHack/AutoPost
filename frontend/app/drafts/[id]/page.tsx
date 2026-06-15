@@ -32,6 +32,26 @@ type PostExtracts = {
   carousel_slides: { text: string }[];
 };
 
+type Platform = "linkedin" | "bluesky" | "mastodon" | "threads" | "instagram";
+type TargetStatus = "pending" | "publishing" | "published" | "failed";
+
+type PostTarget = {
+  id: string;
+  post_id: string;
+  platform: Platform;
+  status: TargetStatus;
+  scheduled_at: string | null;
+  published_at: string | null;
+  external_urn: string | null;
+  error: string | null;
+  // Platform-specific rewritten body, written by the generator at draft-time
+  // for non-canonical platforms (currently Bluesky's 300-char compressed
+  // variant). NULL = uses Post hook+body+tags.
+  commentary: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
 type Post = {
   id: string;
   category: PostCategory;
@@ -47,6 +67,22 @@ type Post = {
   error: string | null;
   created_at: string;
   updated_at: string;
+  targets: PostTarget[];
+};
+
+const PLATFORM_LABEL: Record<Platform, string> = {
+  linkedin: "LinkedIn",
+  bluesky: "Bluesky",
+  mastodon: "Mastodon",
+  threads: "Threads",
+  instagram: "Instagram",
+};
+
+const TARGET_STATUS_COLORS: Record<TargetStatus, string> = {
+  pending: "border-zinc-700 text-zinc-300 bg-zinc-900/50",
+  publishing: "border-yellow-700 text-yellow-300 bg-yellow-950/30",
+  published: "border-green-700 text-green-300 bg-green-950/30",
+  failed: "border-red-700 text-red-300 bg-red-950/30",
 };
 
 type TemplateCategory = "quote" | "insight" | "metric" | "carousel";
@@ -221,10 +257,16 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
 
   const approveDraft = async () => {
     if (!post) return;
+    if (post.targets.length === 0) {
+      setApproveError(
+        "Draft has no targets — regenerate with platforms picked at the top of /drafts.",
+      );
+      return;
+    }
     setApproving(true);
     setApproveError("");
     try {
-      const updated = await apiPost<Post>(`/posts/${post.id}/approve`);
+      const updated = await apiPost<Post>(`/posts/${post.id}/approve`, {});
       setPost(updated);
     } catch (e) {
       setApproveError(e instanceof ApiError ? e.body : (e as Error).message);
@@ -252,9 +294,12 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
 
   const publishNow = async () => {
     if (!post) return;
+    const targetNames = post.targets
+      .map((t) => PLATFORM_LABEL[t.platform])
+      .join(", ");
     if (
       !confirm(
-        "Publish to LinkedIn now? This goes live immediately and cannot be undone.",
+        `Publish now to ${targetNames || "every selected platform"}? This goes live immediately and cannot be undone.`,
       )
     ) {
       return;
@@ -689,16 +734,36 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
               </>
             )}
 
-            {post.status === "failed" && (
+            {(post.status === "failed" ||
+              post.targets.some((t) => t.status === "failed")) && (
               <section className="rounded border border-red-700 bg-red-950/40 p-5 space-y-3">
                 <div className="flex items-start justify-between gap-4">
                   <div>
                     <h3 className="text-sm font-semibold text-red-200">
-                      Publish failed
+                      {post.status === "failed"
+                        ? "Publish failed"
+                        : "One or more targets failed"}
                     </h3>
-                    <p className="text-xs text-red-300 mt-1 font-mono break-all">
-                      {post.error ?? "(no error message recorded)"}
-                    </p>
+                    {/* Per-target errors first; they're the source of truth.
+                        Fall back to post.error for legacy rows. */}
+                    {post.targets.filter((t) => t.status === "failed").length > 0 ? (
+                      <ul className="text-xs text-red-300 mt-1 space-y-1">
+                        {post.targets
+                          .filter((t) => t.status === "failed")
+                          .map((t) => (
+                            <li key={t.id} className="font-mono break-all">
+                              <span className="font-semibold not-italic">
+                                {PLATFORM_LABEL[t.platform]}:
+                              </span>{" "}
+                              {t.error ?? "(no error message recorded)"}
+                            </li>
+                          ))}
+                      </ul>
+                    ) : (
+                      <p className="text-xs text-red-300 mt-1 font-mono break-all">
+                        {post.error ?? "(no error message recorded)"}
+                      </p>
+                    )}
                   </div>
                   <button
                     onClick={retryPublish}
@@ -769,6 +834,80 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
 
             {!editing && (
               <div className="space-y-3 pt-2">
+                {post.targets.length > 0 && (
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    <span className="text-zinc-500">Targets:</span>
+                    {post.targets.map((t) => (
+                      <span
+                        key={t.id}
+                        title={
+                          t.error
+                            ? `${PLATFORM_LABEL[t.platform]}: ${t.error}`
+                            : t.external_urn
+                              ? `${PLATFORM_LABEL[t.platform]}: ${t.external_urn}`
+                              : `${PLATFORM_LABEL[t.platform]}: ${t.status}`
+                        }
+                        className={
+                          "rounded border px-2 py-0.5 " +
+                          TARGET_STATUS_COLORS[t.status]
+                        }
+                      >
+                        {PLATFORM_LABEL[t.platform]} · {t.status}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {post.status === "draft" && post.targets.length > 0 && (
+                  <div className="rounded border border-zinc-800 bg-zinc-950/50 p-3 space-y-2">
+                    <p className="text-xs text-zinc-400">
+                      Platforms were picked at generate time. Each
+                      non-LinkedIn target carries its own platform-shaped
+                      rewrite — preview it by expanding the target below.
+                    </p>
+                    <div className="flex flex-wrap gap-2 text-xs">
+                      {post.targets.map((t) => (
+                        <span
+                          key={t.id}
+                          className="rounded border border-zinc-700 px-2 py-0.5 text-zinc-300"
+                        >
+                          {PLATFORM_LABEL[t.platform]}
+                          {t.commentary && (
+                            <span className="text-zinc-500 ml-1">
+                              · {t.commentary.length} chars
+                            </span>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                    <details className="text-xs text-zinc-400">
+                      <summary className="cursor-pointer text-zinc-500 hover:text-white">
+                        Show per-platform commentary
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        {post.targets.map((t) => (
+                          <div
+                            key={t.id}
+                            className="rounded border border-zinc-800 bg-zinc-900/50 p-2"
+                          >
+                            <div className="text-zinc-500 mb-1">
+                              {PLATFORM_LABEL[t.platform]}
+                              {t.commentary === null && (
+                                <span className="ml-2">
+                                  (uses the canonical hook + body above)
+                                </span>
+                              )}
+                            </div>
+                            {t.commentary && (
+                              <pre className="whitespace-pre-wrap text-zinc-200 font-sans">
+                                {t.commentary}
+                              </pre>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  </div>
+                )}
                 {post.scheduled_at && post.status === "scheduled" && (
                   <div className="rounded border border-indigo-700 bg-indigo-950/30 p-3 text-sm">
                     Scheduled for{" "}
@@ -777,7 +916,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
                     </span>
                     .
                     <span className="text-xs text-zinc-400 ml-2">
-                      The scheduler will publish to LinkedIn at this time.
+                      The scheduler will fan out to each target at this time.
                     </span>
                   </div>
                 )}
