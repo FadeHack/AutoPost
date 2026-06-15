@@ -449,3 +449,117 @@ class TestExtractAIImagePrompt:
         monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
         out = await generator.extract_ai_image_prompt(voiced_text="x")
         assert out == generator._AI_IMAGE_PROMPT_FALLBACK
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 Chunk A follow-up — per-platform commentary
+# ---------------------------------------------------------------------------
+
+
+from app.models.base import Platform  # noqa: E402
+
+
+class TestCanonicalPlatform:
+    """LinkedIn always wins when selected; otherwise platforms are ranked by
+    a fixed order so the canonical Post body is deterministic across calls."""
+
+    def test_linkedin_always_canonical_when_present(self):
+        assert (
+            generator._canonical_platform([Platform.bluesky, Platform.linkedin])
+            == Platform.linkedin
+        )
+
+    def test_bluesky_only_returns_bluesky(self):
+        assert generator._canonical_platform([Platform.bluesky]) == Platform.bluesky
+
+    def test_empty_falls_back_to_linkedin(self):
+        assert generator._canonical_platform([]) == Platform.linkedin
+
+
+class TestCompressForBluesky:
+    async def test_happy_path_returns_compressed(self, monkeypatch):
+        async def fake_chat(**_kwargs):
+            return "Hot take. One line of support. #ai"
+
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator.compress_for_bluesky(source_text="long source post" * 100)
+        assert out == "Hot take. One line of support. #ai"
+        assert len(out) <= 300
+
+    async def test_empty_response_falls_back_to_brand_safe(self, monkeypatch):
+        async def fake_chat(**_kwargs):
+            return ""
+
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator.compress_for_bluesky(source_text="src")
+        assert out == generator._BLUESKY_FALLBACK_COMMENTARY
+
+    async def test_over_300_chars_falls_back_to_brand_safe(self, monkeypatch):
+        async def fake_chat(**_kwargs):
+            # Model returned something but it's still way too long — orchestrator
+            # would fail the gate, so we'd rather ship the safe one-liner.
+            return "x" * 350
+
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator.compress_for_bluesky(source_text="src")
+        assert out == generator._BLUESKY_FALLBACK_COMMENTARY
+
+    async def test_strips_wrapping_quotes(self, monkeypatch):
+        async def fake_chat(**_kwargs):
+            return '"Hot take. Short body."'
+
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator.compress_for_bluesky(source_text="src")
+        assert out == "Hot take. Short body."
+
+
+class TestBuildPlatformCommentary:
+    async def test_linkedin_returns_none(self):
+        # Canonical platform leaves PostTarget.commentary NULL so the
+        # orchestrator falls back to the Post hook+body+tags assemble.
+        out = await generator._build_platform_commentary(
+            Platform.linkedin, source_text="anything"
+        )
+        assert out is None
+
+    async def test_bluesky_returns_compressed(self, monkeypatch):
+        async def fake_chat(**_kwargs):
+            return "Short."
+
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator._build_platform_commentary(
+            Platform.bluesky, source_text="long source"
+        )
+        assert out == "Short."
+
+
+# Orchestrator build_commentary with per-target commentary
+from app.publishing import orchestrator as _orch  # noqa: E402
+
+
+def test_build_commentary_uses_target_commentary_when_set():
+    post = SimpleNamespace(
+        hook="Long hook",
+        body="Long body" * 100,
+        tags=["ai", "founders"],
+    )
+    target = SimpleNamespace(commentary="Compressed Bluesky line.")
+    out = _orch.build_commentary(post, target)
+    assert out == "Compressed Bluesky line."
+
+
+def test_build_commentary_falls_back_when_target_commentary_null():
+    post = SimpleNamespace(
+        hook="Hook.",
+        body="Body.",
+        tags=["x"],
+    )
+    target = SimpleNamespace(commentary=None)
+    out = _orch.build_commentary(post, target)
+    assert "Hook." in out and "Body." in out and "#x" in out
+
+
+def test_build_commentary_no_target_falls_back():
+    post = SimpleNamespace(hook="Hook.", body="Body.", tags=[])
+    out = _orch.build_commentary(post, None)
+    assert out.startswith("Hook.")

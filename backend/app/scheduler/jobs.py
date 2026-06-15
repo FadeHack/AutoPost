@@ -3,6 +3,10 @@
 Add new jobs by writing a coroutine here and appending another add_job()
 call in register_recurring_jobs(). Job IDs are stable strings so
 replace_existing=True works idempotently across restarts.
+
+Phase 11 (Chunk A): publish jobs are per-PostTarget, not per-Post. A draft
+scheduled for both LinkedIn + Bluesky becomes two independent APScheduler
+one-shots so different platform rate limits / failure modes stay isolated.
 """
 from __future__ import annotations
 
@@ -58,59 +62,62 @@ async def retrieval_job() -> None:
         log.exception("scheduler.retrieval.failed", error=str(e))
 
 
-def publish_job_id(post_id: UUID | str) -> str:
-    """Stable per-post job id so reschedule/cancel can target the same job
+def publish_target_job_id(target_id: UUID | str) -> str:
+    """Stable per-target job id so reschedule/cancel can target the same job
     via `replace_existing=True` / `remove_job(id)`."""
-    return f"publish:{post_id}"
+    return f"publish-target:{target_id}"
 
 
-async def publish_post_job(post_id: str) -> None:
-    """APScheduler one-shot: open a fresh DB session and publish.
+async def publish_target_job(target_id: str) -> None:
+    """APScheduler one-shot: open a fresh DB session and publish ONE target.
 
-    Job args must be JSON-serializable for SQLAlchemyJobStore, so the post_id
-    is stored as a string and converted to UUID inside the job.
+    Job args must be JSON-serializable for SQLAlchemyJobStore, so the
+    target_id is stored as a string and converted to UUID inside the job.
     """
-    from app.publishing.publisher import publish_post  # late import — avoids
-    # pulling publisher (and its httpx/supabase imports) into scheduler startup.
+    from app.publishing.orchestrator import publish_target  # late import
 
-    log.info("scheduler.publish.fire", post_id=post_id)
-    pid = UUID(post_id)
+    log.info("scheduler.publish_target.fire", target_id=target_id)
+    tid = UUID(target_id)
     try:
         async with AsyncSessionLocal() as session:
-            post = await publish_post(session, pid)
+            target = await publish_target(session, tid)
         log.info(
-            "scheduler.publish.complete",
-            post_id=post_id,
-            status=post.status.value,
-            urn=post.linkedin_urn,
+            "scheduler.publish_target.complete",
+            target_id=target_id,
+            platform=target.platform.value,
+            status=target.status.value,
+            urn=target.external_urn,
         )
     except Exception as e:
-        # Publisher already wrote status=failed and a PublishingLog row for
-        # any LinkedIn-API error. This catches the rare pre-flight bug
-        # (DB unreachable, etc.) that escaped publish_post itself.
-        log.exception("scheduler.publish.crashed", post_id=post_id, error=str(e))
+        # Orchestrator already wrote status=failed and a PublishingLog row
+        # for any platform error. This catches the rare pre-flight bug
+        # (DB unreachable, etc.) that escaped publish_target itself.
+        log.exception(
+            "scheduler.publish_target.crashed", target_id=target_id, error=str(e)
+        )
 
 
-def schedule_publish(
-    scheduler: AsyncIOScheduler, post_id: UUID, run_date,
+def schedule_target_publish(
+    scheduler: AsyncIOScheduler, target_id: UUID, run_date,
 ) -> None:
-    """Register or replace a one-shot publish job for `post_id` at `run_date`."""
+    """Register or replace a one-shot publish job for `target_id` at `run_date`."""
     scheduler.add_job(
-        publish_post_job,
+        publish_target_job,
         trigger=DateTrigger(run_date=run_date),
-        args=[str(post_id)],
-        id=publish_job_id(post_id),
+        args=[str(target_id)],
+        id=publish_target_job_id(target_id),
         replace_existing=True,
-        # A scheduler restart could miss the exact fire time; allow a 1h grace
-        # so a published-while-offline post still goes out when the worker comes back.
+        # Scheduler restart could miss the exact fire time; allow a 1h grace
+        # so a published-while-offline target still goes out when the worker
+        # comes back.
         misfire_grace_time=3600,
         coalesce=True,
     )
 
 
-def cancel_publish(scheduler: AsyncIOScheduler, post_id: UUID) -> bool:
-    """Remove any pending publish job for the post. Returns True if one existed."""
-    jid = publish_job_id(post_id)
+def cancel_target_publish(scheduler: AsyncIOScheduler, target_id: UUID) -> bool:
+    """Remove any pending publish job for the target. Returns True if one existed."""
+    jid = publish_target_job_id(target_id)
     if scheduler.get_job(jid) is None:
         return False
     scheduler.remove_job(jid)

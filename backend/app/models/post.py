@@ -1,18 +1,27 @@
 import uuid
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import DateTime, Enum as SAEnum, String
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, PostCategory, PostStatus, TimestampMixin, uuid_pk
 
+if TYPE_CHECKING:
+    from app.models.post_target import PostTarget
+
 
 class Post(Base, TimestampMixin):
-    """A LinkedIn post in the draft → published lifecycle.
+    """A draft in the editorial lifecycle.
 
-    Status lifecycle (no skipping): draft → approved → scheduled → publishing → (published | failed).
+    `posts.status` caps at `scheduled` post-Phase 11. Per-platform delivery
+    (publishing → published|failed) is tracked on `post_targets`, one row per
+    selected platform. `posts.status` becomes `published` once all targets
+    terminate with ≥1 success, `failed` if all fail.
+
+    Status lifecycle: draft → approved → scheduled → (published | failed)
+    where the terminal states are aggregated from `post_targets`.
     """
 
     __tablename__ = "posts"
@@ -59,3 +68,15 @@ class Post(Base, TimestampMixin):
     # Shape: {pull_quote, metric_value, metric_label, carousel_slides[{text}]}.
     # Nullable — existing rows stay NULL until first re-render (lazy-fills).
     extracts: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    # Per-platform delivery rows. Created at approve time when the operator
+    # selects targets; one per `(post_id, platform)`. Drives the publisher.
+    # `lazy='selectin'` so PostRead serialization (from_attributes=True) doesn't
+    # trip the async lazy-load guard.
+    targets: Mapped[list["PostTarget"]] = relationship(
+        back_populates="post",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="PostTarget.created_at",
+    )

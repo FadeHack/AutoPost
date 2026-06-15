@@ -10,7 +10,12 @@ from app.models.base import Base, PublishingStatus, TimestampMixin, uuid_pk
 
 
 class PublishingLog(Base, TimestampMixin):
-    """One row per LinkedIn publish attempt for a Post. Append-only."""
+    """One row per publish attempt for a post target. Append-only.
+
+    `post_id` kept for query convenience and pre-Phase-11 backfill; new rows
+    always carry `target_id`. `linkedin_response` is the legacy column name
+    but holds the JSON response from whichever platform the target maps to.
+    """
 
     __tablename__ = "publishing_logs"
 
@@ -19,6 +24,14 @@ class PublishingLog(Base, TimestampMixin):
         UUID(as_uuid=True),
         ForeignKey("posts.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
+    )
+    # Phase 11+: which target this attempt is for. Nullable so legacy rows
+    # (one-target-per-post LinkedIn era) survive the migration.
+    target_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("post_targets.id", ondelete="CASCADE"),
+        nullable=True,
         index=True,
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)

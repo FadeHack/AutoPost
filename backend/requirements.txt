@@ -39,6 +39,9 @@ PyJWT[crypto]==2.10.1
 # Reddit
 praw==7.8.1
 
+# Bluesky / AT Protocol (pre-1.0 SDK — exact pin, no caret ranges)
+atproto==0.0.62
+
 # Utility
 python-dotenv==1.0.1
 structlog==24.4.0

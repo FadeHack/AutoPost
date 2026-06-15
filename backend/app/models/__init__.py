@@ -5,17 +5,22 @@ from app.models.analytics import AnalyticsSnapshot
 from app.models.base import (
     AccountKind,
     Base,
+    Platform,
     PostCategory,
     PostStatus,
     PublishingStatus,
+    TargetStatus,
     TemplateCategory,
     TimestampMixin,
     TrendSource,
     UserRole,
 )
+from app.models.bluesky_account import BlueskyAccount
 from app.models.generated_asset import GeneratedAsset
 from app.models.linkedin_account import LinkedInAccount
+from app.models.mastodon_account import MastodonAccount
 from app.models.post import Post
+from app.models.post_target import PostTarget
 from app.models.prompt import Prompt
 from app.models.publishing_log import PublishingLog
 from app.models.template import Template
@@ -26,18 +31,23 @@ __all__ = [
     "Base",
     "TimestampMixin",
     "AccountKind",
+    "Platform",
     "PostCategory",
     "PostStatus",
     "PublishingStatus",
+    "TargetStatus",
     "TemplateCategory",
     "TrendSource",
     "UserRole",
     "User",
     "LinkedInAccount",
+    "BlueskyAccount",
+    "MastodonAccount",
     "Trend",
     "Prompt",
     "Template",
     "Post",
+    "PostTarget",
     "GeneratedAsset",
     "AIGeneration",
     "PublishingLog",

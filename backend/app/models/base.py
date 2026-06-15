@@ -20,6 +20,8 @@ __all__ = [
     "TemplateCategory",
     "PublishingStatus",
     "RenderKind",
+    "Platform",
+    "TargetStatus",
 ]
 
 
@@ -101,3 +103,22 @@ class PublishingStatus(str, enum.Enum):
 class RenderKind(str, enum.Enum):
     template = "template"
     ai_image = "ai_image"
+
+
+class Platform(str, enum.Enum):
+    """Publishing destinations. MVP wires `linkedin` + `bluesky`; the rest
+    are scaffolded for Phase 11 Chunks B–D."""
+    linkedin = "linkedin"
+    bluesky = "bluesky"
+    mastodon = "mastodon"
+    threads = "threads"
+    instagram = "instagram"
+
+
+class TargetStatus(str, enum.Enum):
+    """Per-target delivery lifecycle. `posts.status` caps at `scheduled`;
+    each `post_targets` row carries its own status from here on."""
+    pending = "pending"
+    publishing = "publishing"
+    published = "published"
+    failed = "failed"

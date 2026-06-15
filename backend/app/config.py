@@ -36,6 +36,12 @@ class Settings(BaseSettings):
     # Deferred — only populated if Community Management API is ever approved
     LINKEDIN_ORG_URN: str = ""
 
+    # Mastodon (federated — OAuth client is registered dynamically per instance
+    # at connect time, so no fixed client_id/secret here)
+    MASTODON_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/auth/mastodon/callback"
+    MASTODON_CLIENT_NAME: str = "Nestwhirr AutoPost"
+    MASTODON_SCOPES: str = "read write"
+
     # Reddit
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""

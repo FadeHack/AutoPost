@@ -32,8 +32,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
 from app.intelligence import article, groq_client, voice
-from app.models.base import PostCategory, PostStatus
+from app.models.base import Platform, PostCategory, PostStatus
 from app.models.post import Post
+from app.models.post_target import PostTarget
 from app.models.prompt import Prompt
 from app.models.trend import Trend
 
@@ -179,6 +180,26 @@ Return only the JSON object. No preamble."""
 # Fallback prompt used when Stage 5 fails entirely (bad JSON, network error,
 # all model attempts produced empty strings). Keeps the brand identity even if
 # the LLM goes silent.
+_BLUESKY_COMPRESS_SYSTEM = """You rewrite a long LinkedIn-style post into a Bluesky post.
+
+HARD RULES:
+- Bluesky character limit is 300 TOTAL (spaces, line breaks, hashtags included). Stay UNDER 280.
+- The OPENING LINE must be a contrarian opinion, a reaction, or a sharp claim — NOT a description of what happened. Match the editorial stance of the source. If the source says "X assumption is wrong", the Bluesky version must also say it, in fewer words.
+- "Porting X was a wild ride" is WRONG (recap). "Cross-platform is not 'write once run anywhere'. Pointer size will bite you." is RIGHT (opinion).
+- ONE opinion per post. No survey. No "this experience highlights…" framing.
+- Format: hook (the opinion) + ONE supporting concrete (a number, name, or specific detail from the source). That's it. No paragraphs. No closing summary. No "Lessons:" or "Takeaway:" wrappers.
+- 1-2 lowercase hashtags max at the end, or zero if they'd push over the limit.
+- Punctuation: NO em-dash (—), NO en-dash (–), NO double-hyphen (--) as a separator. Use a period or line break. Ban: "delve", "moreover", "furthermore", "in conclusion", "it's worth noting".
+
+Output ONLY the rewritten Bluesky post text. No preamble, no surrounding quotes, no "Here is..." opener."""
+
+# Bluesky-target safety net used when the rewrite stage hard-fails or returns
+# empty. Long-form Bluesky posts fail loud at publish; a brand-safe one-liner
+# gets the draft to a publishable state at least.
+_BLUESKY_FALLBACK_COMMENTARY = (
+    "Most takes on this miss the point. Builders ship; analysts narrate."
+)
+
 _AI_IMAGE_PROMPT_FALLBACK = (
     "minimalist editorial illustration on a near-black background, "
     "soft contrast, one subject centered, no text"
@@ -493,14 +514,111 @@ async def run_pipeline(
     return hook, body, tags, extracts, violations
 
 
+async def compress_for_bluesky(
+    *, source_text: str, prompt_id: UUID | None = None
+) -> str:
+    """Rewrite a LinkedIn-shaped post for Bluesky's 300-char cap.
+
+    FAST model + tight system prompt. Falls back to a brand-safe one-liner
+    when the rewrite is empty or still over the cap — better to ship a
+    publishable Bluesky post than a 1641-char one that fails at publish.
+    """
+    raw = await groq_client.chat(
+        stage="bluesky_compress",
+        model=settings.GROQ_MODEL_FAST,
+        prompt_id=prompt_id,
+        messages=[
+            {"role": "system", "content": _BLUESKY_COMPRESS_SYSTEM},
+            {"role": "user", "content": source_text},
+        ],
+        temperature=0.5,
+        max_tokens=200,
+    )
+    out = (raw or "").strip().strip('"').strip("'").strip()
+    if not out:
+        log.warning("generator.bluesky_compress.empty")
+        return _BLUESKY_FALLBACK_COMMENTARY
+    # The model occasionally returns text > 300 anyway. Treat that as
+    # failure and fall back — silently shipping over-cap is worse than
+    # shipping the safety net.
+    if len(out) > 300:
+        log.warning(
+            "generator.bluesky_compress.too_long",
+            length=len(out),
+        )
+        return _BLUESKY_FALLBACK_COMMENTARY
+    return out
+
+
+# Canonical platform — when the operator picks multiple platforms, this
+# one's content lives on the Post itself. Other platforms get a rewrite
+# stored on their PostTarget. LinkedIn always wins canonical when selected
+# because the rest of the pipeline (extracts, AI image prompt, carousel
+# slides) was designed against LinkedIn-shaped text.
+_CANONICAL_ORDER = [
+    Platform.linkedin,
+    Platform.mastodon,
+    Platform.threads,
+    Platform.instagram,
+    Platform.bluesky,
+]
+
+
+def _canonical_platform(platforms: list[Platform]) -> Platform:
+    if not platforms:
+        return Platform.linkedin
+    chosen = set(platforms)
+    for p in _CANONICAL_ORDER:
+        if p in chosen:
+            return p
+    return platforms[0]
+
+
+async def _build_platform_commentary(
+    platform: Platform, *, source_text: str, prompt_id: UUID | None = None
+) -> str | None:
+    """Per-platform rewrite. LinkedIn uses the canonical Post body (returns
+    None — orchestrator assembles from hook/body/tags). Bluesky always goes
+    through the 300-char compression — Stage 2 hardcodes the LinkedIn voice
+    prompt so even a Bluesky-only draft has a 1000+ char Post.body, and the
+    orchestrator's char-limit gate would fail without a compressed override
+    on the target. Mastodon/Threads/Instagram: TODO until publishers land."""
+    if platform == Platform.linkedin:
+        return None
+    if platform == Platform.bluesky:
+        return await compress_for_bluesky(
+            source_text=source_text, prompt_id=prompt_id
+        )
+    return None
+
+
 async def generate_draft(
     session: AsyncSession,
     *,
     category: PostCategory,
     trend_ids: list[UUID] | None = None,
+    platforms: list[Platform] | None = None,
     max_trends: int = MAX_TRENDS_PER_DRAFT,
 ) -> Post:
-    """Pick trends, run pipeline, persist draft, mark source trends consumed."""
+    """Pick trends, run pipeline, persist draft + PostTargets, mark
+    source trends consumed.
+
+    `platforms` (default `[Platform.linkedin]`) drives both:
+    - which PostTarget rows are pre-created on the draft, and
+    - per-platform commentary rewriting (Bluesky gets compressed inline).
+    Operator confirms the picks by approving the draft later.
+    """
+    platforms = platforms or [Platform.linkedin]
+    # De-dupe but preserve order so the canonical resolver is deterministic.
+    seen: set[Platform] = set()
+    picked_platforms: list[Platform] = []
+    for p in platforms:
+        if p not in seen:
+            seen.add(p)
+            picked_platforms.append(p)
+    if not picked_platforms:
+        raise ValueError("at least one platform required")
+
     prompt = await _load_active_prompt(session, category)
 
     picked = await _pick_trends(session, trend_ids, limit=max_trends)
@@ -518,6 +636,8 @@ async def generate_draft(
         trends_block=trends_block,
     )
 
+    canonical_text = f"{hook.strip()}\n\n{body.strip()}"
+
     post = Post(
         category=category,
         hook=hook[:512],
@@ -528,6 +648,26 @@ async def generate_draft(
         status=PostStatus.draft,
     )
     session.add(post)
+    await session.flush()  # need post.id for the PostTarget FK below.
+
+    # NOTE: we do NOT skip _build_platform_commentary for the "canonical"
+    # platform. Stage 2 is hardcoded LinkedIn-voice so Post.body is always
+    # LinkedIn-shaped — even a Bluesky-only draft. Each non-LinkedIn target
+    # needs its own commentary or the orchestrator's char-limit gate fails
+    # at publish. LinkedIn target keeps commentary=None (falls back to Post).
+    for platform in picked_platforms:
+        commentary = await _build_platform_commentary(
+            platform,
+            source_text=canonical_text,
+            prompt_id=prompt.id,
+        )
+        session.add(
+            PostTarget(
+                post_id=post.id,
+                platform=platform,
+                commentary=commentary,
+            )
+        )
 
     now = datetime.now(timezone.utc)
     for t in picked:

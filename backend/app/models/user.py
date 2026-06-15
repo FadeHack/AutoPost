@@ -9,7 +9,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin, UserRole
 
 if TYPE_CHECKING:
+    from app.models.bluesky_account import BlueskyAccount
     from app.models.linkedin_account import LinkedInAccount
+    from app.models.mastodon_account import MastodonAccount
 
 
 class User(Base, TimestampMixin):
@@ -26,6 +28,14 @@ class User(Base, TimestampMixin):
     )
 
     linkedin_accounts: Mapped[list["LinkedInAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    bluesky_accounts: Mapped[list["BlueskyAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    mastodon_accounts: Mapped[list["MastodonAccount"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )
