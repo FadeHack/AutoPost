@@ -41,8 +41,10 @@ from app.models.base import (
     TargetStatus,
 )
 from app.publishing import bluesky as _bluesky  # noqa: F401 — triggers register
+from app.publishing import instagram as _instagram  # noqa: F401 — triggers register
 from app.publishing import linkedin as _linkedin  # noqa: F401 — triggers register
 from app.publishing import mastodon as _mastodon  # noqa: F401 — triggers register
+from app.publishing import threads as _threads  # noqa: F401 — triggers register
 from app.publishing.base import (
     AuthPublishError,
     PermanentPublishError,
@@ -135,6 +137,10 @@ async def _load_account(session: AsyncSession, post: Post, platform: Platform):
         return await _bluesky.load_account(session, post)
     if platform == Platform.mastodon:
         return await _mastodon.load_account(session, post)
+    if platform == Platform.threads:
+        return await _threads.load_account(session, post)
+    if platform == Platform.instagram:
+        return await _instagram.load_account(session, post)
     raise PermanentPublishError(
         f"no account loader for platform '{platform.value}'"
     )

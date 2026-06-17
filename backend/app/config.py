@@ -42,6 +42,30 @@ class Settings(BaseSettings):
     MASTODON_CLIENT_NAME: str = "Nestwhirr AutoPost"
     MASTODON_SCOPES: str = "read write"
 
+    # Threads (Meta-gated — single fixed app, 3-legged OAuth via Meta's OIDC).
+    # client_id/secret are the Threads app's, NOT the parent Meta app's.
+    # PLATFORM_THREADS_ENABLED stays false until Meta App Review clears
+    # threads_basic + threads_content_publish (precedent: LinkedIn org posting).
+    THREADS_APP_ID: str = ""
+    THREADS_APP_SECRET: str = ""
+    THREADS_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/auth/threads/callback"
+    THREADS_SCOPES: str = "threads_basic,threads_content_publish"
+    THREADS_API_VERSION: str = "v1.0"
+    PLATFORM_THREADS_ENABLED: bool = False
+
+    # Instagram (Meta-gated — Instagram Login flow, NOT Facebook Login). The
+    # lightweight path that skips the legacy Facebook-Page link; requires a
+    # Creator/Business account. Scopes use the Instagram-Login naming
+    # (instagram_business_*), the Facebook-Login variant is instagram_basic /
+    # instagram_content_publish. PLATFORM_INSTAGRAM_ENABLED stays false until
+    # Meta App Review clears (precedent: Threads / LinkedIn org posting).
+    INSTAGRAM_APP_ID: str = ""
+    INSTAGRAM_APP_SECRET: str = ""
+    INSTAGRAM_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/auth/instagram/callback"
+    INSTAGRAM_SCOPES: str = "instagram_business_basic,instagram_business_content_publish"
+    INSTAGRAM_API_VERSION: str = "v21.0"
+    PLATFORM_INSTAGRAM_ENABLED: bool = False
+
     # Reddit
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""

@@ -516,21 +516,72 @@ class TestCompressForBluesky:
 class TestBuildPlatformCommentary:
     async def test_linkedin_returns_none(self):
         # Canonical platform leaves PostTarget.commentary NULL so the
-        # orchestrator falls back to the Post hook+body+tags assemble.
+        # orchestrator falls back to the Post hook+body+tags assemble. LinkedIn
+        # short-circuits before any DB lookup, so session=None is safe.
         out = await generator._build_platform_commentary(
-            Platform.linkedin, source_text="anything"
+            None,
+            PostCategory.founder_insight,
+            Platform.linkedin,
+            source_text="anything",
         )
         assert out is None
 
-    async def test_bluesky_returns_compressed(self, monkeypatch):
+    async def test_bluesky_no_prompt_falls_back_to_compress(self, monkeypatch):
+        # No per-platform Bluesky prompt seeded for this category → legacy
+        # compress_for_bluesky keeps existing categories publishing.
+        async def no_prompt(*_a, **_k):
+            return None
+
         async def fake_chat(**_kwargs):
             return "Short."
 
+        monkeypatch.setattr(generator, "_load_platform_prompt", no_prompt)
         monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
         out = await generator._build_platform_commentary(
-            Platform.bluesky, source_text="long source"
+            None,
+            PostCategory.founder_insight,
+            Platform.bluesky,
+            source_text="long source",
         )
         assert out == "Short."
+
+    async def test_uses_db_prompt_when_present(self, monkeypatch):
+        # A seeded per-platform prompt drives a proper Stage-2 rewrite instead
+        # of the compress fallback.
+        fake_prompt = SimpleNamespace(
+            id=uuid.uuid4(), platform=Platform.bluesky, body="bluesky voice"
+        )
+
+        async def has_prompt(*_a, **_k):
+            return fake_prompt
+
+        async def fake_chat(**_kwargs):
+            return "Rewritten for bluesky."
+
+        monkeypatch.setattr(generator, "_load_platform_prompt", has_prompt)
+        monkeypatch.setattr(generator.groq_client, "chat", fake_chat)
+        out = await generator._build_platform_commentary(
+            None,
+            PostCategory.founder_insight,
+            Platform.bluesky,
+            source_text="long source",
+        )
+        assert out == "Rewritten for bluesky."
+
+    async def test_mastodon_no_prompt_returns_none(self, monkeypatch):
+        # No per-platform prompt + not Bluesky → None (falls back to canonical
+        # Post.body and trips the char-limit gate loudly).
+        async def no_prompt(*_a, **_k):
+            return None
+
+        monkeypatch.setattr(generator, "_load_platform_prompt", no_prompt)
+        out = await generator._build_platform_commentary(
+            None,
+            PostCategory.founder_insight,
+            Platform.mastodon,
+            source_text="long source",
+        )
+        assert out is None
 
 
 # Orchestrator build_commentary with per-target commentary

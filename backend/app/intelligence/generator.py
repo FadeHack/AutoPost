@@ -234,19 +234,57 @@ async def _enrich_trends(trends: list[Trend]) -> list[tuple[Trend, str | None]]:
 
 
 async def _load_active_prompt(
-    session: AsyncSession, category: PostCategory
+    session: AsyncSession,
+    category: PostCategory,
+    platform: Platform | None = None,
 ) -> Prompt:
-    stmt = (
+    """Matrix lookup (Phase 12). Prefer the per-platform variant
+    `(name=category, platform=platform, is_active)`; fall back to the
+    `platform IS NULL` "any/legacy" variant when no per-platform row exists
+    (graceful for new categories seeded before their full matrix lands).
+    Highest active version wins. Raises if neither exists."""
+    base = (
         select(Prompt)
         .where(Prompt.category == category)
         .where(Prompt.is_active.is_(True))
         .order_by(Prompt.version.desc())
         .limit(1)
     )
-    row = (await session.execute(stmt)).scalar_one_or_none()
-    if row is None:
-        raise ValueError(f"No active prompt for category '{category.value}'")
-    return row
+    if platform is not None:
+        row = (
+            await session.execute(base.where(Prompt.platform == platform))
+        ).scalar_one_or_none()
+        if row is not None:
+            return row
+    row = (
+        await session.execute(base.where(Prompt.platform.is_(None)))
+    ).scalar_one_or_none()
+    if row is not None:
+        return row
+    raise ValueError(
+        f"No active prompt for category '{category.value}' "
+        f"(platform={platform.value if platform else 'any'})"
+    )
+
+
+async def _load_platform_prompt(
+    session: AsyncSession, category: PostCategory, platform: Platform
+) -> Prompt | None:
+    """Exact per-platform prompt lookup for the Stage-2 commentary rewrite.
+
+    No NULL fallback on purpose: a NULL/legacy prompt is the LinkedIn-shaped
+    canonical voice, which is the wrong shape to use as a per-platform rewrite
+    system prompt. Returns None when the category has no prompt for `platform`
+    yet, so the caller can pick a graceful fallback."""
+    stmt = (
+        select(Prompt)
+        .where(Prompt.category == category)
+        .where(Prompt.platform == platform)
+        .where(Prompt.is_active.is_(True))
+        .order_by(Prompt.version.desc())
+        .limit(1)
+    )
+    return (await session.execute(stmt)).scalar_one_or_none()
 
 
 async def _pick_trends(
@@ -574,17 +612,88 @@ def _canonical_platform(platforms: list[Platform]) -> Platform:
     return platforms[0]
 
 
+# Mirrors each Publisher.char_limit on the backend — keep in sync with the
+# publisher classes and frontend PlatformPreview.PLATFORM_LIMITS.
+PLATFORM_CHAR_LIMITS: dict[Platform, int] = {
+    Platform.linkedin: 3000,
+    Platform.bluesky: 300,
+    Platform.mastodon: 500,
+    Platform.threads: 500,
+    Platform.instagram: 2200,
+}
+
+
+async def run_platform_rewrite(
+    *,
+    prompt: Prompt,
+    source_text: str,
+    char_limit: int,
+    prompt_id: UUID | None = None,
+) -> str:
+    """Stage-2 voice rewrite for one platform, driven by a DB prompt row.
+
+    The prompt's `body` is the platform-specific voice/shape system prompt
+    (Bluesky ≤280, Threads conversational ≤500, Mastodon engineering-leaning
+    ≤500, Instagram hashtag-heavy caption). We feed it the canonical
+    LinkedIn-shaped post as source material and let it reshape.
+
+    AI-tells are stripped deterministically afterwards. We do NOT truncate to
+    the char limit: if a seeded prompt over-shoots, the orchestrator's gate
+    fails the target loudly — that's the signal to fix the prompt, not to ship
+    a mangled post (project philosophy, see [[project_per_platform_generation_strategy]])."""
+    raw = await groq_client.chat(
+        stage=f"voice_{prompt.platform.value if prompt.platform else 'any'}",
+        model=settings.GROQ_MODEL_FAST,
+        prompt_id=prompt_id or prompt.id,
+        messages=[
+            {"role": "system", "content": prompt.body},
+            {"role": "user", "content": source_text},
+        ],
+        temperature=0.5,
+        max_tokens=min(800, max(200, char_limit // 3)),
+    )
+    out, violations = voice.strip_ai_tells(raw or "")
+    out = out.strip().strip('"').strip("'").strip()
+    if violations:
+        log.info("generator.platform_rewrite.tells_stripped", violations=violations)
+    if len(out) > char_limit:
+        log.warning(
+            "generator.platform_rewrite.over_cap",
+            platform=prompt.platform.value if prompt.platform else "any",
+            length=len(out),
+            cap=char_limit,
+        )
+    return out
+
+
 async def _build_platform_commentary(
-    platform: Platform, *, source_text: str, prompt_id: UUID | None = None
+    session: AsyncSession,
+    category: PostCategory,
+    platform: Platform,
+    *,
+    source_text: str,
+    prompt_id: UUID | None = None,
 ) -> str | None:
-    """Per-platform rewrite. LinkedIn uses the canonical Post body (returns
-    None — orchestrator assembles from hook/body/tags). Bluesky always goes
-    through the 300-char compression — Stage 2 hardcodes the LinkedIn voice
-    prompt so even a Bluesky-only draft has a 1000+ char Post.body, and the
-    orchestrator's char-limit gate would fail without a compressed override
-    on the target. Mastodon/Threads/Instagram: TODO until publishers land."""
+    """Per-platform commentary for one target (Phase 12: DB-prompt-driven).
+
+    LinkedIn → None: the orchestrator assembles the canonical Post hook/body/
+    tags, which is already the LinkedIn artifact.
+
+    Other platforms → load the per-platform prompt and run a proper Stage-2
+    rewrite. When a category has no per-platform prompt yet, fall back
+    gracefully: Bluesky keeps the legacy `compress_for_bluesky` so existing
+    categories still publish; Mastodon/Threads/Instagram return None (fall back
+    to the LinkedIn-shaped Post.body and trip the char-limit gate loudly until
+    their prompt is seeded — intentional pressure, not a bug)."""
     if platform == Platform.linkedin:
         return None
+    prompt = await _load_platform_prompt(session, category, platform)
+    if prompt is not None:
+        return await run_platform_rewrite(
+            prompt=prompt,
+            source_text=source_text,
+            char_limit=PLATFORM_CHAR_LIMITS[platform],
+        )
     if platform == Platform.bluesky:
         return await compress_for_bluesky(
             source_text=source_text, prompt_id=prompt_id
@@ -619,7 +728,10 @@ async def generate_draft(
     if not picked_platforms:
         raise ValueError("at least one platform required")
 
-    prompt = await _load_active_prompt(session, category)
+    # Canonical Post is always the LinkedIn artifact (Stage 3/4/5 + rendering
+    # are LinkedIn-shaped). Load the LinkedIn prompt variant, falling back to
+    # the platform=NULL legacy prompt for categories without a full matrix.
+    prompt = await _load_active_prompt(session, category, platform=Platform.linkedin)
 
     picked = await _pick_trends(session, trend_ids, limit=max_trends)
     if not picked:
@@ -657,6 +769,8 @@ async def generate_draft(
     # at publish. LinkedIn target keeps commentary=None (falls back to Post).
     for platform in picked_platforms:
         commentary = await _build_platform_commentary(
+            session,
+            category,
             platform,
             source_text=canonical_text,
             prompt_id=prompt.id,

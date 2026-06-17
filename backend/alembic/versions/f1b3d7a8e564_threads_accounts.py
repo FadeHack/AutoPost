@@ -1,0 +1,70 @@
+"""threads_accounts (Phase 11 Chunk C)
+
+Revision ID: f1b3d7a8e564
+Revises: e2a7c4b96d18
+Create Date: 2026-06-16 12:00:00.000000
+
+Phase 11 Chunk C — Threads publisher (Meta-gated).
+
+New table `threads_accounts` — Meta 3-legged OAuth against a single fixed
+Threads app. Long-lived access token (60 days) Fernet-encrypted; `expires_at`
+present (token refreshes in place, no separate refresh_token). No backfill —
+the operator connects an account at runtime once Meta App Review clears.
+"""
+from __future__ import annotations
+
+from typing import Sequence, Union
+
+import sqlalchemy as sa
+from alembic import op
+
+
+revision: str = "f1b3d7a8e564"
+down_revision: Union[str, None] = "e2a7c4b96d18"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    op.create_table(
+        "threads_accounts",
+        sa.Column(
+            "id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
+        sa.Column(
+            "user_id",
+            sa.dialects.postgresql.UUID(as_uuid=True),
+            sa.ForeignKey("users.id", ondelete="CASCADE"),
+            nullable=False,
+            index=True,
+        ),
+        sa.Column("threads_user_id", sa.String(length=255), nullable=False),
+        sa.Column("username", sa.String(length=255), nullable=False),
+        sa.Column("access_token", sa.String(), nullable=False),
+        sa.Column("expires_at", sa.DateTime(timezone=True), nullable=True),
+        sa.Column("display_name", sa.String(length=255), nullable=True),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.func.now(),
+            nullable=False,
+        ),
+        sa.UniqueConstraint(
+            "user_id",
+            "threads_user_id",
+            name="uq_threads_accounts_user_threads_user",
+        ),
+    )
+
+
+def downgrade() -> None:
+    op.drop_table("threads_accounts")

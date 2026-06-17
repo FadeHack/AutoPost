@@ -74,6 +74,11 @@ class PostCategory(str, enum.Enum):
     startup_opinion = "startup_opinion"
     technical_humor = "technical_humor"
     carousel = "carousel"
+    # Phase 12 Chunk B — content surface expansion.
+    dev_tooling = "dev_tooling"
+    pricing_business_model = "pricing_business_model"
+    product_postmortem = "product_postmortem"
+    design_thinking = "design_thinking"
 
 
 class PostStatus(str, enum.Enum):

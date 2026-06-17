@@ -160,6 +160,62 @@ Notes:
 
 ---
 
+## Connecting Threads (Meta-gated)
+
+Threads is a **single fixed Meta app** (LinkedIn-shaped OAuth, not federated). It's **disabled by default** behind `PLATFORM_THREADS_ENABLED` — you can't connect until Meta App Review approves `threads_basic` + `threads_content_publish` (same legal-gate shape as LinkedIn org posting). Code ships ahead of approval; pre-approval the API only works against the app's developer/tester accounts.
+
+Env (in `backend/.env`, stubbed in `backend/.env.example`):
+- `THREADS_APP_ID=` / `THREADS_APP_SECRET=` — the **Threads app's** client id/secret (Meta dashboard → Threads product → API setup), not the parent Meta app's.
+- `THREADS_REDIRECT_URI=http://127.0.0.1:8000/api/v1/auth/threads/callback` (must match the Meta app config exactly).
+- `THREADS_SCOPES=threads_basic,threads_content_publish`
+- `THREADS_API_VERSION=v1.0`
+- `PLATFORM_THREADS_ENABLED=false` → flip to `true` once approved. When false: `/auth/threads/start` returns 503 and the dashboard + `/generate` picker hide Threads.
+
+Steps (once enabled + approved):
+1. Dashboard → **Threads** section → **Connect Threads** → redirect to Meta's authorize → approve.
+2. On callback the backend exchanges the code for a short-lived token, **immediately upgrades it to a 60-day long-lived token**, resolves `/me`, and persists the Fernet-encrypted token + `expires_at` in `threads_accounts`.
+3. Verify:
+   ```sql
+   SELECT user_id, username, display_name, expires_at FROM threads_accounts;
+   ```
+
+Notes:
+- **Token refresh is automatic + in place.** The 60-day long-lived token refreshes inside the publisher (`_ensure_fresh_token`, 2-day lead) — Threads' `/refresh_access_token` returns a fresh token, there's no separate refresh token. If the token fully dies (>60d untouched), a 401 surfaces and you reconnect.
+- **Char limit:** Threads caps at 500 chars — same Phase-12 caveat as Mastodon. A LinkedIn-shaped draft fails the orchestrator's gate; a ≤500-char draft publishes.
+- **Images:** Threads fetches the image from our public Supabase bucket URL itself — nothing to upload. Carousels publish as 2–20 image containers assembled into one CAROUSEL post.
+
+---
+
+## Connecting Instagram (Meta-gated)
+
+Instagram uses Meta's **Instagram Login** flow (NOT Facebook Login — the lightweight path that skips the legacy Facebook-Page link). Like Threads it's a single fixed Meta app and is **disabled by default** behind `PLATFORM_INSTAGRAM_ENABLED` — you can't connect until Meta App Review approves the Instagram content-publish scopes. Code ships ahead of approval; pre-approval the API only works against the app's developer/tester accounts.
+
+**Account prerequisite:** the Instagram account must be a **Creator or Business (Professional)** account — personal accounts can't publish via API. Converting is free, reversible, and takes ~30s in the IG mobile app settings.
+
+Env (in `backend/.env`, stubbed in `backend/.env.example`):
+- `INSTAGRAM_APP_ID=` / `INSTAGRAM_APP_SECRET=` — the **Instagram app's** client id/secret (Meta dashboard → Instagram product → API setup with Instagram Login).
+- `INSTAGRAM_REDIRECT_URI=http://127.0.0.1:8000/api/v1/auth/instagram/callback` (must match the Meta app config exactly).
+- `INSTAGRAM_SCOPES=instagram_business_basic,instagram_business_content_publish` (the Instagram-Login scope naming; the Facebook-Login variant is `instagram_basic`/`instagram_content_publish`).
+- `INSTAGRAM_API_VERSION=v21.0`
+- `PLATFORM_INSTAGRAM_ENABLED=false` → flip to `true` once approved. When false: `/auth/instagram/start` returns 503 and the dashboard + `/generate` picker hide Instagram.
+
+Steps (once enabled + approved):
+1. Convert the IG account to Creator/Business if it isn't already.
+2. Dashboard → **Instagram** section → **Connect Instagram** → redirect to Meta's authorize → approve.
+3. On callback the backend exchanges the code for a short-lived token (+ the IG-scoped `user_id`), **immediately upgrades it to a 60-day long-lived token**, resolves `/me`, and persists the Fernet-encrypted token + `expires_at` in `instagram_accounts`.
+4. Verify:
+   ```sql
+   SELECT user_id, username, account_type, expires_at FROM instagram_accounts;
+   ```
+
+Notes:
+- **Token refresh is automatic + in place** — same as Threads (`_ensure_fresh_token`, 2-day lead, `ig_refresh_token`, no separate refresh token; full death after ~60d untouched → reconnect).
+- **Instagram requires an image.** There is no text-only IG post — a draft targeting Instagram with no rendered card fails the publish loudly. **Render a card first.** Use square (1080×1080) or 4:5 art; the minimal-dark templates already render square.
+- **Caption limit:** 2200 chars (far above our LinkedIn-shaped body, so the char-limit gate effectively never trips for IG).
+- **Images:** IG fetches the image from our public Supabase bucket URL itself — nothing to upload. Carousels publish as 2–10 image containers assembled into one CAROUSEL post.
+
+---
+
 ## Common Operations
 
 (These will work as the relevant phase lands. Currently Phase 0 — only health-check works.)
@@ -171,6 +227,8 @@ curl -X POST http://127.0.0.1:8000/api/v1/posts/generate \
   -H "Content-Type: application/json" \
   -d '{"category":"founder_insight"}'
 ```
+Categories (Phase 12): `founder_insight`, `engineering_lesson`, `ai_automation`, `startup_opinion`, `dev_tooling`, `pricing_business_model`, `product_postmortem`, `design_thinking`. Pass `"platforms": ["linkedin","bluesky",...]` to fan out — each non-LinkedIn target is rewritten by that platform's prompt variant (LinkedIn-shaped body stays on the Post; per-platform text lands on `post_targets.commentary`).
+
 Or use the **"Generate draft"** button in the dashboard.
 
 ### Render an image for a post
@@ -288,9 +346,9 @@ playwright install-deps   # Linux only
 4. Trigger `POST /api/v1/trends/refresh` to verify it's pulled (check `per_source.rss` in the response increments by up to `MAX_ENTRIES_PER_FEED`).
 
 ### Add a new prompt template
-1. Insert a new row in the `prompts` table with a unique `name`, the prompt `body`, and `is_active=true`.
-2. Bump the `version` if you're replacing an existing one (set the old version `is_active=false`).
-3. Code path that consumes prompts loads by `name` and the active version.
+1. Insert a new row in the `prompts` table with a `name` (= category), a `platform` (`linkedin`/`bluesky`/`mastodon`/`threads`/`instagram`, or NULL for the "any/legacy" variant), the prompt `body`, and `is_active=true`. The matrix key is `(name, platform, version)`.
+2. Bump the `version` if you're replacing an existing one (set the old `(name, platform)` version `is_active=false`).
+3. The generator loads via `_load_active_prompt(category, platform)` — it prefers the exact per-platform row, then falls back to `platform IS NULL`. The LinkedIn row is used by `run_pipeline` (Stage-1 writer); the other platforms' rows are used by `run_platform_rewrite` (Stage-2 rewrite of the canonical LinkedIn post). To re-voice a platform, flip `is_active` — no code deploy.
 
 ### Add a new visual template
 1. Drop a new HTML file in `backend/app/rendering/templates/`. Keep the
@@ -306,10 +364,10 @@ playwright install-deps   # Linux only
    feeds from this).
 
 ### Add a new content category
-1. Add the category constant in `backend/app/schemas/post.py` (the `PostCategory` enum).
-2. Add a prompt template for it (`prompts` table).
-3. Optionally add a default visual template (`templates` table).
-4. The dashboard category dropdown updates automatically from the API.
+1. Add the value to the `PostCategory` enum in `backend/app/models/base.py`.
+2. Alembic migration: add the value to the `post_category` PG enum **inside an `op.get_context().autocommit_block()`** (Postgres forbids using a freshly-added enum value in the same transaction), then `bulk_insert` its prompt rows. Mirror `c5f9a26b81e4_seed_phase12_categories.py` — ideally seed all **5 platform variants** (LinkedIn = Stage-1 writer prompt; Bluesky/Threads/Mastodon/Instagram = Stage-2 rewrite prompts honoring each char budget). At minimum seed the LinkedIn row.
+3. Optionally map it in `_DEFAULT_TEMPLATE_BY_CATEGORY` (`renderer.py`); unmapped categories fall back to `insight_card`.
+4. Frontend dropdown is a **manual TS list**, not API-driven: add the value to the `PostCategory` union + `CATEGORY_LABEL` + `CATEGORY_COLORS` in all four pages that render category chips (`app/drafts/page.tsx`, `app/drafts/[id]/page.tsx`, `app/scheduled/page.tsx`, `app/published/page.tsx`), and to `GENERATABLE` in `app/drafts/page.tsx` to expose it in the generate dropdown. `tsc --noEmit` will flag any map you miss.
 
 ---
 

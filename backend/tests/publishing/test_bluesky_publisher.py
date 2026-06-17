@@ -236,3 +236,75 @@ def test_bluesky_publisher_metadata():
     assert bsky.BlueskyPublisher.char_limit == 300
     assert bsky.BlueskyPublisher.max_images == 4
     assert bsky.BlueskyPublisher.supports_documents is False
+
+
+# ---------------------------------------------------------------------------
+# Hashtag facets — `#tags` must become real app.bsky.richtext.facet#tag facets,
+# not grey plain text. These build against the REAL atproto SDK.
+# ---------------------------------------------------------------------------
+@pytest.fixture
+def real_atproto():
+    """Undo the `patched` fixture's sys.modules["atproto"] = MagicMock so
+    `_build_richtext` resolves the genuine client_utils.TextBuilder."""
+    import importlib
+    import sys
+
+    sys.modules.pop("atproto", None)
+    importlib.import_module("atproto")
+    yield
+
+
+def _tag_values(builder):
+    """Extract the tag-facet values from a built TextBuilder."""
+    values = []
+    for facet in builder.build_facets():
+        for feature in facet.features:
+            tag = getattr(feature, "tag", None)
+            if tag is not None:
+                values.append(tag)
+    return values
+
+
+def test_build_richtext_promotes_hashtags(real_atproto):
+    builder, has_tags = bsky._build_richtext("Builders ship. #ai #startups")
+    assert has_tags is True
+    # Text is preserved verbatim — facets are an overlay, not a rewrite.
+    assert builder.build_text() == "Builders ship. #ai #startups"
+    assert _tag_values(builder) == ["ai", "startups"]
+
+
+def test_build_richtext_facet_byte_offsets_are_correct(real_atproto):
+    text = "résumé take #ai"  # multibyte before the tag → byte != char offset
+    builder, _ = bsky._build_richtext(text)
+    facet = builder.build_facets()[0]
+    raw = text.encode("utf-8")
+    # The byte range the facet points at must decode back to the tag token.
+    assert raw[facet.index.byte_start : facet.index.byte_end].decode("utf-8") == "#ai"
+
+
+def test_build_richtext_no_tags_returns_plain(real_atproto):
+    builder, has_tags = bsky._build_richtext("No tags here, just a take.")
+    assert has_tags is False
+
+
+def test_build_richtext_skips_pure_numeric(real_atproto):
+    # "#1" is not a valid tag; it stays plain text, but "#ai" still faceted.
+    builder, has_tags = bsky._build_richtext("ranked #1 by #ai")
+    assert has_tags is True
+    assert builder.build_text() == "ranked #1 by #ai"
+    assert _tag_values(builder) == ["ai"]
+
+
+async def test_publish_passes_textbuilder_when_tagged(patched):
+    """Tagged commentary → a TextBuilder (not a str) reaches send_post, and the
+    log records faceted_tags=True."""
+    pub = bsky.BlueskyPublisher()
+    result = await pub.publish(
+        session=None,
+        post=SimpleNamespace(id=uuid4(), hook="Hook"),
+        account=_account(),
+        commentary="Builders ship. #ai",
+        assets=[],
+    )
+    assert not isinstance(patched.calls["send_post"], str)  # a TextBuilder
+    assert result.raw_request["faceted_tags"] is True

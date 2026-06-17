@@ -4,10 +4,23 @@ Polite: sends a real User-Agent, honors ETag / Last-Modified between runs
 (in-memory cache — survives a single process lifetime; the orchestrator's
 DB-level (source, source_id) constraint catches dupes across restarts).
 
-Feed list verified live in May 2026. Update DEFAULT_FEEDS here, not at call
-sites. Anthropic + Indie Hackers were considered but neither publishes an
-official RSS feed; Hugging Face replaces Anthropic and HackerNews covers
-indie/builder signal.
+Feed list verified live in May 2026, extended + re-verified June 2026 for
+Phase 12. Update DEFAULT_FEEDS here, not at call sites. Anthropic + Indie
+Hackers were considered but neither publishes an official RSS feed; Hugging
+Face replaces Anthropic and HackerNews covers indie/builder signal.
+
+Phase 12 freshness pass (2026-06-17) — added feeds aimed at the new categories
+(dev_tooling, product_postmortem, design_thinking). Each was fetched live and
+confirmed publishing in 2026:
+  - lethain.com (Will Larson, engineering leadership)  — newest 2026-06-15
+  - jvns.ca (Julia Evans, hands-on engineering)        — newest 2026-05-15
+  - nngroup.com (Nielsen Norman Group, UX/design)      — newest 2026-06-12
+CUT per the freshness gate:
+  - rachelbythebay — blocks non-browser bots (404 on feed AND site to our UA);
+    an automated retrieval bot can't reliably read it, so the unique
+    incident-writeup signal isn't worth a feed that won't fetch.
+  - a16z.com/feed/ — 404, and its business/pricing angle duplicates the
+    Stratechery + Stripe coverage already in the list.
 """
 from __future__ import annotations
 
@@ -27,10 +40,10 @@ log = structlog.get_logger()
 
 USER_AGENT = "AutoPost/0.1 (+autopost retrieval bot)"
 
-# Feed URLs verified live in May 2026. First Round Review removed — both
-# candidate URLs (/rss, /feed.xml) return 404; their RSS appears to be
-# discontinued. Anthropic also has no official feed; Hugging Face covers
-# the "primary AI source" slot instead. Five feeds is intentionally tight.
+# Feed URLs verified live in May 2026 (first 7), Phase 12 additions re-verified
+# 2026-06-17 (last 3). First Round Review removed — both candidate URLs (/rss,
+# /feed.xml) return 404; their RSS appears to be discontinued. Anthropic also
+# has no official feed; Hugging Face covers the "primary AI source" slot.
 DEFAULT_FEEDS: list[str] = [
     "https://stratechery.com/feed/",
     "https://stripe.com/blog/feed.rss",
@@ -39,6 +52,10 @@ DEFAULT_FEEDS: list[str] = [
     "https://huggingface.co/blog/feed.xml",
     "https://simonwillison.net/atom/everything/",
     "https://www.latent.space/feed",
+    # Phase 12 (dev_tooling / product_postmortem / design_thinking surface):
+    "https://lethain.com/feeds/",
+    "https://jvns.ca/atom.xml",
+    "https://www.nngroup.com/feed/rss/",
 ]
 
 # Per-feed item cap and age cutoff. Most of our feeds publish their full

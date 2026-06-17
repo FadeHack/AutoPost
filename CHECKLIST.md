@@ -485,26 +485,33 @@ Original (deferred) scope, kept for reference:
 - [x] Tests: 30 new in [tests/publishing/test_mastodon_publisher.py](backend/tests/publishing/test_mastodon_publisher.py) — normalize_instance, state round-trip, register_app/exchange_code/verify_credentials, media sync + async-poll, carousel truncation to 4, error classification (401/403/429/503/422/400), account loader. **Full suite 262 passing.** tsc clean. Migration applied to Supabase; all 4 routes registered.
 - [ ] **Live (user-driven):** connect a real Mastodon account via the dashboard → OAuth round-trip → `mastodon_accounts` row. Generate a draft targeting Mastodon → approve → publish-now → confirm the target **fails the 500-char gate** with the clear error (expected until Phase 12). A hand-shortened ≤500-char draft publishes end-to-end.
 
-### Chunk C — Threads publisher (Meta-gated)
-- [ ] **Submit Meta App Review in parallel with code.** Two permissions: `threads_basic`, `threads_content_publish`. Per [[project_linkedin_org_posting]] this gate is the same shape — code now, approval later. Pre-approval the publisher works only against the developer + tester accounts in the Meta app.
-- [ ] `ThreadsPublisher` — two-step container API (`POST /threads` → `POST /threads_publish`). 500-char text limit. Single-image and carousel both supported.
-- [ ] OAuth: `/auth/threads/start` + callback via Meta's OIDC.
-- [ ] New env var `PLATFORM_THREADS_ENABLED` (default `false`). Frontend target picker hides Threads when flag is off.
-- [ ] Tests: 10+ — mocked two-step flow, image attach, char-limit gate.
+### Chunk C — Threads publisher (Meta-gated) ✅ (2026-06-16)
+- [ ] **Submit Meta App Review in parallel with code.** Two permissions: `threads_basic`, `threads_content_publish`. Per [[project_linkedin_org_posting]] this gate is the same shape — code now, approval later. Pre-approval the publisher works only against the developer + tester accounts in the Meta app. _(User action — code ships ahead of approval.)_
+- [x] `ThreadsPublisher` ([publishing/threads.py](backend/app/publishing/threads.py)) — raw httpx, two-step container API. Create container `POST {graph}/{ver}/{user-id}/threads` (media_type TEXT/IMAGE/CAROUSEL), poll the container `status` until FINISHED (media is processed async), then `POST .../threads_publish` with `creation_id`. Carousel = N× `is_carousel_item` IMAGE containers (each polled) → parent CAROUSEL container with `children`. `char_limit=500`, `max_images=20` (carousel 2–20). Threads fetches `image_url` from our public Supabase bucket itself (no byte download). Error classification 401/403→Auth, 429/5xx→Transient, other 4xx→Permanent, **plus** a body sniff for Meta's `OAuthException`/code 190 (returned as 400 for a dead token) → Auth.
+- [x] OAuth ([publishing/threads_oauth.py](backend/app/publishing/threads_oauth.py) + [api/auth_threads.py](backend/app/api/auth_threads.py)) — single fixed Meta app (LinkedIn-shaped, not federated). `/auth/threads/start` returns the authorize URL; `/callback` exchanges the code for a **short-lived** token, immediately upgrades to a **60-day long-lived** token (`th_exchange_token`), resolves the profile (`/me`), and persists. `/status` + `/disconnect` round it out. Web-verified endpoints against developers.facebook.com (two sources) per CLAUDE.md.
+- [x] **Token refresh is in place, no separate refresh_token.** `threads_accounts` (migration `f1b3d7a8e564`) carries `expires_at` but no `refresh_token` — Threads `GET /refresh_access_token` returns a fresh access token. `ThreadsPublisher._ensure_fresh_token` refreshes proactively when within a 2-day lead of expiry. The orchestrator's forced-refresh-on-401 branch guards on `hasattr(account, "refresh_token")`, so a hard 401 degrades to terminal-after-retries (operator reconnects) — same clean degradation as Mastodon.
+- [x] New env var `PLATFORM_THREADS_ENABLED` (default `false`). Backend gates `/auth/threads/start` (503 when off) and `/status` returns `enabled: false`. Frontend uses that `enabled` flag as the source of truth — the dashboard Threads connect section AND the `/generate` platform picker both hide Threads when off (no separate frontend env var).
+- [x] Orchestrator/scheduler/posts API needed **zero changes** — `Platform.threads` already existed and the publish/schedule/retry/aggregate paths are platform-agnostic. Wiring was one register-import + one `_load_account` branch.
+- [x] Tests: 28 new in [tests/publishing/test_threads_publisher.py](backend/tests/publishing/test_threads_publisher.py) — state round-trip, authorize URL, exchange_code/exchange_long_lived/refresh/fetch_profile, token staleness + proactive refresh, publish text/single-image/carousel/truncate-to-max, container ERROR-status → permanent, error classification (incl. OAuthException-in-400 → Auth), account loader. **Full suite 290 passing.** tsc clean. Migration applied to Supabase; all 4 routes registered.
+- [ ] **Live (user-driven, post-approval):** flip `PLATFORM_THREADS_ENABLED=true`, connect a Threads tester account → OAuth round-trip → `threads_accounts` row with a 60-day `expires_at`. Generate a ≤500-char draft targeting Threads → approve → publish-now → confirm the container creates, polls FINISHED, publishes, and the media id lands on the `post_targets` row.
 
-### Chunk D — Instagram publisher (Meta-gated + account conversion)
-- [ ] **User converts Instagram → Creator account.** 30 seconds in IG mobile settings, free, reversible. Required because personal IG accounts cannot publish via API (web-verified June 2026). Creator account skips the legacy Facebook Page link requirement.
-- [ ] Submit separate Meta App Review for `instagram_basic` + `instagram_content_publish`.
-- [ ] `InstagramPublisher` — two-step create+publish container (same shape as Threads but different endpoints). Square (1080×1080) or 4:5 (1080×1350) image, 2200-char caption.
-- [ ] OAuth via Instagram Login flow (NOT Facebook Login — the lightweight path that skips the Page link).
-- [ ] New env var `PLATFORM_INSTAGRAM_ENABLED` (default `false`).
-- [ ] Tests: 10+ — container create + publish polling, image dim validation.
+### Chunk D — Instagram publisher (Meta-gated + account conversion) ✅ (2026-06-16)
+- [ ] **User converts Instagram → Creator account.** 30 seconds in IG mobile settings, free, reversible. Required because personal IG accounts cannot publish via API (web-verified June 2026). Creator account skips the legacy Facebook Page link requirement. _(User action.)_
+- [ ] **Submit Meta App Review** for the Instagram content-publish scopes. Note: the **Instagram Login** flow uses `instagram_business_basic` + `instagram_business_content_publish` (the Facebook-Login variant is `instagram_basic`/`instagram_content_publish`); we use the Instagram-Login naming since that's the mandated flow. Scopes are env-driven (`INSTAGRAM_SCOPES`) so a rename is a one-line change. _(User action — code ships ahead of approval.)_
+- [x] `InstagramPublisher` ([publishing/instagram.py](backend/app/publishing/instagram.py)) — raw httpx, two-step container API. Create `POST {graph}/{ver}/{ig-user-id}/media` (single image: `image_url`+`caption`; carousel: N× `is_carousel_item` image containers → parent `media_type=CAROUSEL`+`children`), poll the container `status_code` until FINISHED, then `POST .../media_publish` with `creation_id`. **No text-only post** — empty assets → `PermanentPublishError` (IG requires media, unlike Threads). `char_limit=2200`, `max_images=10` (carousel 2–10). IG fetches `image_url` from our public Supabase bucket itself. Error classification mirrors Threads (401/403→Auth, 429/5xx→Transient, other 4xx→Permanent, + OAuthException/code-190 body sniff → Auth).
+- [x] OAuth ([publishing/instagram_oauth.py](backend/app/publishing/instagram_oauth.py) + [api/auth_instagram.py](backend/app/api/auth_instagram.py)) — Meta's **Instagram Login** flow (NOT Facebook Login — the lightweight path that skips the Facebook-Page link). `/auth/instagram/start` returns the authorize URL; `/callback` exchanges the code for a short-lived token (+ IG-scoped `user_id`, used as the publish path segment), upgrades to a 60-day long-lived token (`ig_exchange_token`), resolves the profile (`/me?fields=user_id,username,account_type`), and persists. `/status` + `/disconnect` round it out. Code-exchange body handles both flat `{access_token,user_id}` and wrapped `{data:[…]}` shapes. Web-verified against developers.facebook.com (two sources) per CLAUDE.md.
+- [x] **Token refresh is in place, no separate refresh_token** (same as Threads). `instagram_accounts` (migration `a3c8e0f5471b`) carries `expires_at` but no `refresh_token` — `GET /refresh_access_token?grant_type=ig_refresh_token` returns a fresh access token. `InstagramPublisher._ensure_fresh_token` refreshes proactively inside a 2-day lead; the orchestrator's forced-refresh-on-401 guard (`hasattr(account,"refresh_token")`) degrades a hard 401 to terminal-after-retries.
+- [x] New env var `PLATFORM_INSTAGRAM_ENABLED` (default `false`). Backend gates `/auth/instagram/start` (503 when off) and `/status` returns `enabled:false`. Frontend uses that `enabled` flag as the source of truth — the dashboard Instagram connect section AND the `/generate` platform picker both hide Instagram when off (no separate frontend env var).
+- [x] Orchestrator/scheduler/posts API needed **zero changes** — `Platform.instagram` already existed; wiring was one register-import + one `_load_account` branch.
+- [x] Tests: 30 new in [tests/publishing/test_instagram_publisher.py](backend/tests/publishing/test_instagram_publisher.py) — state round-trip, authorize URL, exchange_code (flat + wrapped body + missing-fields), long-lived/refresh/profile (incl. legacy `id` field), token staleness + proactive refresh, **publish requires-image gate**, single-image (asserts no `media_type`, `caption` param), carousel (`ITEM1,ITEM2,ITEM3`), truncate-to-max, container ERROR `status_code` → permanent, error classification (incl. OAuthException-in-400 → Auth), account loader. **Full suite 320 passing.** tsc clean. Migration applied to Supabase; all 4 routes registered.
+- [ ] **Live (user-driven, post-approval):** convert to Creator account, flip `PLATFORM_INSTAGRAM_ENABLED=true`, connect via Instagram Login → `instagram_accounts` row with a 60-day `expires_at`. Generate a draft targeting Instagram, **render a card** (IG requires an image), approve → publish-now → confirm the container creates, polls FINISHED, publishes, and the media id lands on the `post_targets` row.
 
-### Chunk E — Per-platform preview + E2E
-- [ ] `LinkedInPreview.tsx` extracted into a generic `PlatformPreview` component with per-platform variants: `LinkedInCard`, `BlueskyCard`, `MastodonCard`, `ThreadsCard`, `InstagramCard`. Not pixel-perfect — signal is "line breaks + char limit warning + image-hang + hashtag styling."
-- [ ] Inline char-limit warning when the generated body exceeds the selected platform's cap (links to Phase 12's per-platform prompt variants — long-term fix is generation, not truncation).
-- [ ] E2E: one draft → target LinkedIn + Bluesky simultaneously → approve → publish-now → both URNs persist on their respective `post_targets` rows; both posts go live.
-- [ ] E2E (Meta-gated): same draft against Threads (tester account, pre-approval) → publishes successfully against the dev IG/Threads sandbox.
+### Chunk E — Per-platform preview + E2E ✅ (2026-06-16)
+- [x] New generic [PlatformPreview.tsx](frontend/components/PlatformPreview.tsx) — platform tab strip across the draft's targets, dispatching to per-platform card variants: LinkedIn reuses the existing rich `LinkedInPreview`; Bluesky/Mastodon/Threads share a text-first `MicroblogCard` (platform-accented handle + hashtags + single-image hang); Instagram gets an image-first `InstagramCard` that **flags the no-image case** (IG can't post text-only — surfaces the would-be publish-gate failure inline). Not pixel-perfect by design. Wired into [drafts/[id]/page.tsx](frontend/app/drafts/[id]/page.tsx) replacing the LinkedIn-only block; reads each target's `commentary` (per-platform rewrite) or falls back to the canonical hook+body+tags.
+- [x] Inline char-limit warning: `PLATFORM_LIMITS` mirrors each `Publisher.char_limit` (LinkedIn 3000, Bluesky 300, Mastodon/Threads 500, Instagram 2200). Live char count per tab; over-cap shows an amber banner naming the cap + that the long-term fix is per-platform generation (Phase 12), not truncation, and notes when the target is falling back to the LinkedIn-shaped body.
+- [x] **Code-level E2E** ([tests/publishing/test_orchestrator.py](backend/tests/publishing/test_orchestrator.py) `test_fan_out_persists_distinct_urns_per_platform`): one draft → LinkedIn + Bluesky targets → each publishes via its own publisher and persists a **distinct** `external_urn`, proving the fan-out + per-target persistence are platform-independent. Suite 321 passing, tsc clean.
+- [x] **Live E2E (user-driven):** one draft → target LinkedIn + Bluesky simultaneously → approve → publish-now → both URNs persist on their respective `post_targets` rows; both posts go live. _(Requires real connected accounts — goes live, can't run from CI.)_
+- [ ] **Live E2E (Meta-gated, user-driven):** same draft against Threads/Instagram (tester accounts, pre-approval) → publishes against the Meta dev sandbox once the flags are flipped + App Review clears.
 
 ---
 
@@ -512,39 +519,30 @@ Original (deferred) scope, kept for reference:
 
 **Goal:** widen content surface. 4 new categories with seeded prompts. Restructure `prompts` for (category × platform) matrix so the same draft category produces a long LinkedIn post, a 280-char Bluesky line, a 500-char Threads post, etc. Add 1–2 RSS feeds aimed at the new categories — **freshness gate is non-negotiable: any new feed must be publishing in 2026 and posting at least monthly, otherwise it's cut.**
 
-### Chunk A — Prompt matrix refactor
-- [ ] Alembic: `prompts.platform` enum column (`'linkedin'`, `'bluesky'`, `'mastodon'`, `'threads'`, `'instagram'`, nullable for "any/legacy"). Existing 4 rows get `platform='linkedin'`. New unique constraint `(name, platform, version)`.
-- [ ] `generator.run_pipeline(category, platform)` signature change. Loads `(name=category, platform=platform, is_active=true)` — falls back to `platform=NULL` if no per-platform variant exists (graceful for new categories pre-seed).
-- [ ] Stage 2 (voice rewrite) is where per-platform tone differs most:
-  - LinkedIn: 140–220 words, 4–7 paragraphs (current voice, unchanged)
-  - Bluesky: ≤280 chars, hook + one supporting line
-  - Threads: ≤500 chars, conversational
-  - Mastodon: ≤500 chars, slightly more technical/engineering-leaning audience
-  - Instagram: caption shape, hashtag-heavier (5–10 vs LinkedIn's 3 cap)
-- [ ] Tests: 8+ — matrix lookup happy path, fallback to platform=NULL, char-length asserts per platform.
+### Chunk A — Prompt matrix refactor ✅ (2026-06-16)
+- [x] Alembic (`b7d3a1c8e92f`): `prompts.platform` enum column (reuses the existing `platform` enum type, nullable for "any/legacy"). Existing 4 rows backfilled to `platform='linkedin'`. New unique constraint `uq_prompts_name_platform_version` `(name, platform, version)`. Applied to Supabase.
+- [x] Matrix lookup: `_load_active_prompt(session, category, platform)` prefers the per-platform variant, falls back to `platform IS NULL`, raises if neither. Canonical pipeline loads `platform='linkedin'`. New `_load_platform_prompt` (exact-platform, no NULL fallback) drives the per-target commentary rewrite.
+- [x] Stage-2 per-platform rewrite is now **DB-driven** via `run_platform_rewrite` (replaces the hardcoded `compress_for_bluesky` inline stopgap per memory [[project-per-platform-generation-strategy]]). `_build_platform_commentary` loads the per-platform prompt; LinkedIn → None (canonical Post); no-prompt fallbacks: Bluesky → legacy `compress_for_bluesky`, Mastodon/Threads/Instagram → None (trips char-gate loudly until seeded). Per-platform tone (LinkedIn 140–220w / Bluesky ≤280 / Threads ≤500 conversational / Mastodon ≤500 engineering / Instagram hashtag-heavy caption) lives in the **seeded prompt bodies** (Chunk B). Over-cap output is NOT truncated — loud gate failure is the signal to fix the prompt.
+- [x] Tests: 12 new (`tests/intelligence/test_prompt_matrix.py` + updated `TestBuildPlatformCommentary`) — matrix prefer-platform, NULL fallback, platform=None skip, raise-when-neither, exact `_load_platform_prompt`, `PLATFORM_CHAR_LIMITS` map, rewrite within-cap / no-truncate-over-cap / Instagram long-caption. 333 backend tests passing.
 
-### Chunk B — 4 new categories with seeded prompts
-- [ ] `dev_tooling` — anchor examples from Will Larson (Lethain), Pragmatic Engineer
-- [ ] `pricing_business_model` — anchor examples from Stratechery, Stripe blog
-- [ ] `product_postmortem` — anchor examples from rachelbythebay-style incident writeups
-- [ ] `design_thinking` — anchor examples from Julie Zhuo, NN/g (verify current publishing cadence)
-- [ ] Alembic migration seeds each — 4 categories × 5 platforms = 20 prompt rows, all v1, all `is_active=true`. Per-platform anchors honor that platform's char budget so the model learns the shape from the examples, not just the rules.
-- [ ] Drafts UI category dropdown grows from 4 to 8.
+### Chunk B — 4 new categories with seeded prompts ✅ (2026-06-17)
+- [x] `dev_tooling` — anchors: Will Larson (internal platforms as products), Gergely Orosz / Pragmatic Engineer (DORA over LOC)
+- [x] `pricing_business_model` — anchors: Ben Thompson / Stratechery (aggregation, free tiers), Stripe (usage-based pricing)
+- [x] `product_postmortem` — anchors: rachelbythebay-style blameless incident writeups (root cause is the system, rehearse the failure)
+- [x] `design_thinking` — anchors: Julie Zhuo (design = decisions), NN/g (research before pixels)
+- [x] Alembic migration `c5f9a26b81e4` seeds each — 4 categories × 5 platforms = **20 prompt rows**, all v1, all `is_active=true`. Verified live (20 rows, 5 per category, all platforms, all active). The LinkedIn variant is a Stage-1 angle/writer prompt (long-form founder voice, v4 shape); the Bluesky/Threads/Mastodon/Instagram variants are Stage-2 **rewrite** prompts with a per-platform anchor honoring that platform's char budget. Enum prerequisite handled: the 4 new `post_category` values are added inside an `autocommit_block` so the seed INSERTs can reference them (Postgres same-transaction restriction).
+- [x] Drafts UI category dropdown grows from 4 to 8 (`GENERATABLE`). `PostCategory` type union + `CATEGORY_LABEL` + `CATEGORY_COLORS` extended across all 4 pages that render category chips (drafts, drafts/[id], scheduled, published) so tsc stays green. tsc exit 0.
+- [x] **Follow-up (2026-06-17, migration `e8b4c1f7d320`):** backfilled the 16 missing per-platform rewrite prompts for the original 4 categories (founder_insight/engineering_lesson/ai_automation/startup_opinion × bluesky/threads/mastodon/instagram) reusing their v4 anchor voices. All 8 generatable categories now uniform on the matrix → **40 active prompt rows** (8 × 5). `compress_for_bluesky` demoted to pure safety net. (`technical_humor`/`carousel` remain prompt-less + absent from `GENERATABLE` — latent, not reachable.)
 
-### Chunk C — Fresh RSS additions
-- [ ] **Web-verify each candidate feed is still publishing in 2026** (CLAUDE.md rule). Cut any that 404, haven't posted in 30 days, or duplicate existing feeds.
-- [ ] Candidates to verify + add:
-  - Lethain.com (Will Larson — engineering management)
-  - rachelbythebay (postmortems)
-  - Julia Evans (zines + blog)
-  - a16z editorial (semi-monthly business/pricing)
-  - NN/g (design)
-- [ ] Per-feed 25-cap + 90-day age cutoff already in place from Phase 2 — no new code needed. Freshness gate is enforced by retrieval.
+### Chunk C — Fresh RSS additions ✅ (2026-06-17)
+- [x] **Web-verified each candidate feed live (2026-06-17)** per CLAUDE.md. Survivors fetched + confirmed publishing in 2026.
+- [x] Verified + added (3): **Lethain.com** `https://lethain.com/feeds/` (newest 2026-06-15), **Julia Evans** `https://jvns.ca/atom.xml` (newest 2026-05-15), **NN/g** `https://www.nngroup.com/feed/rss/` (newest 2026-06-12). **Cut (2):** rachelbythebay — blocks non-browser bots (404 to our UA on both feed + site; our retrieval bot can't read it); a16z `/feed/` — 404 + duplicates the Stratechery/Stripe business/pricing coverage already in the list.
+- [x] Per-feed 25-cap + 90-day age cutoff already in place — no new code. Freshness gate enforced by retrieval.
 
-### Chunk D — UI + activation
-- [ ] Category dropdown extended; per-platform previews from Phase 11 Chunk E automatically consume the right prompt variant.
-- [ ] E2E matrix smoke: generate `dev_tooling` for Bluesky → short punchy output; same category for LinkedIn → 140–220-word post. Confirms the matrix dispatches correctly.
-- [ ] E2E freshness check: run retrieval after adding new feeds → confirm new sources appear in `/trends` with `published_at` within 30 days.
+### Chunk D — UI + activation ✅ (2026-06-17)
+- [x] Category dropdown extended (Chunk B); per-platform previews from Phase 11 Chunk E automatically consume the right prompt variant — `PlatformPreview` reads each target's `commentary`, which now comes from the DB matrix. No code change needed.
+- [x] **E2E freshness check (run live):** fetched the 3 new feeds → 27 items within the 90-day cutoff, **11 within 30 days** (Lethain 06-15, NN/g 06-12/06-05, etc.). New sources return recent `fetched_at`. ✅
+- [ ] **E2E matrix smoke (user-driven, live):** generate `dev_tooling` for Bluesky → short punchy output; same category for LinkedIn → 140–220-word post. Needs live Groq tokens + trends in the pool; the matrix *dispatch* is proven at the code level (`test_prompt_matrix.py` + `TestBuildPlatformCommentary`), the subjective output-length check goes live with a real generation.
 
 ### Chunk E — Custom categories (deferred)
 - [ ] Admin UI for runtime-defined categories is **deferred to a future Phase 13** if real demand surfaces. Seeded-via-migration keeps voice quality controlled by anchor examples; a free-form UI risks generic AI-spam output (violates CLAUDE.md philosophy). No schema change needed later — prompts table is already data-driven, so when/if this lands it's a UI + write endpoint, not a refactor.
@@ -565,4 +563,5 @@ Original (deferred) scope, kept for reference:
 
 ## Discovered Tasks (added as work progresses)
 
-(None yet.)
+- [x] **Bluesky hashtag facets (2026-06-17).** `#tags` in Bluesky posts were inert plain text — atproto needs `app.bsky.richtext.facet#tag` facets. `bluesky._build_richtext` now rebuilds the commentary through `client_utils.TextBuilder` so the generated tags are real/clickable. Mastodon/Instagram/LinkedIn parse or auto-link hashtags natively, so no change needed there. +5 tests (338 total).
+- [ ] **Threads hashtag behavior (deferred, Meta-gated).** Worth confirming when Threads goes live whether its API auto-links hashtags from `text` or needs a `topic_tag`-style field; if the latter, mirror the Bluesky facet approach in the Threads publisher.

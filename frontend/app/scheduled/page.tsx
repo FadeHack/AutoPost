@@ -12,7 +12,11 @@ type PostCategory =
   | "ai_automation"
   | "startup_opinion"
   | "technical_humor"
-  | "carousel";
+  | "carousel"
+  | "dev_tooling"
+  | "pricing_business_model"
+  | "product_postmortem"
+  | "design_thinking";
 
 type Post = {
   id: string;
@@ -36,6 +40,10 @@ const CATEGORY_LABEL: Record<PostCategory, string> = {
   startup_opinion: "Startup opinion",
   technical_humor: "Technical humor",
   carousel: "Carousel",
+  dev_tooling: "Dev tooling",
+  pricing_business_model: "Pricing & business model",
+  product_postmortem: "Product postmortem",
+  design_thinking: "Design thinking",
 };
 
 const CATEGORY_COLORS: Record<PostCategory, string> = {
@@ -45,6 +53,10 @@ const CATEGORY_COLORS: Record<PostCategory, string> = {
   startup_opinion: "border-amber-700 text-amber-300 bg-amber-950/30",
   technical_humor: "border-pink-700 text-pink-300 bg-pink-950/30",
   carousel: "border-zinc-700 text-zinc-300 bg-zinc-950/30",
+  dev_tooling: "border-teal-700 text-teal-300 bg-teal-950/30",
+  pricing_business_model: "border-lime-700 text-lime-300 bg-lime-950/30",
+  product_postmortem: "border-rose-700 text-rose-300 bg-rose-950/30",
+  design_thinking: "border-fuchsia-700 text-fuchsia-300 bg-fuchsia-950/30",
 };
 
 function relativeFromNow(iso: string): string {

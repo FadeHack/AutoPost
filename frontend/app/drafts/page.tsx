@@ -20,16 +20,32 @@ type PostCategory =
   | "ai_automation"
   | "startup_opinion"
   | "technical_humor"
-  | "carousel";
+  | "carousel"
+  // Phase 12 Chunk B — content surface expansion.
+  | "dev_tooling"
+  | "pricing_business_model"
+  | "product_postmortem"
+  | "design_thinking";
 
-// Currently-implemented publishers. Mastodon/Threads/Instagram land in Phase 11 B–D.
-type GenPlatform = "linkedin" | "bluesky" | "mastodon";
+// Currently-implemented publishers. Threads + Instagram are Meta-gated — only
+// shown when the backend reports them enabled (PLATFORM_{THREADS,INSTAGRAM}_ENABLED).
+type GenPlatform = "linkedin" | "bluesky" | "mastodon" | "threads" | "instagram";
 
 const GEN_PLATFORMS: { id: GenPlatform; label: string }[] = [
   { id: "linkedin", label: "LinkedIn" },
   { id: "bluesky", label: "Bluesky" },
   { id: "mastodon", label: "Mastodon" },
 ];
+
+// Appended to the picker only when the backend reports each enabled.
+const THREADS_PLATFORM: { id: GenPlatform; label: string } = {
+  id: "threads",
+  label: "Threads",
+};
+const INSTAGRAM_PLATFORM: { id: GenPlatform; label: string } = {
+  id: "instagram",
+  label: "Instagram",
+};
 
 type Post = {
   id: string;
@@ -54,6 +70,10 @@ const CATEGORY_LABEL: Record<PostCategory, string> = {
   startup_opinion: "Startup opinion",
   technical_humor: "Technical humor",
   carousel: "Carousel",
+  dev_tooling: "Dev tooling",
+  pricing_business_model: "Pricing & business model",
+  product_postmortem: "Product postmortem",
+  design_thinking: "Design thinking",
 };
 
 const CATEGORY_COLORS: Record<PostCategory, string> = {
@@ -63,6 +83,10 @@ const CATEGORY_COLORS: Record<PostCategory, string> = {
   startup_opinion: "border-amber-700 text-amber-300 bg-amber-950/30",
   technical_humor: "border-pink-700 text-pink-300 bg-pink-950/30",
   carousel: "border-zinc-700 text-zinc-300 bg-zinc-950/30",
+  dev_tooling: "border-teal-700 text-teal-300 bg-teal-950/30",
+  pricing_business_model: "border-lime-700 text-lime-300 bg-lime-950/30",
+  product_postmortem: "border-rose-700 text-rose-300 bg-rose-950/30",
+  design_thinking: "border-fuchsia-700 text-fuchsia-300 bg-fuchsia-950/30",
 };
 
 const STATUS_COLORS: Record<PostStatus, string> = {
@@ -79,6 +103,10 @@ const GENERATABLE: PostCategory[] = [
   "engineering_lesson",
   "ai_automation",
   "startup_opinion",
+  "dev_tooling",
+  "pricing_business_model",
+  "product_postmortem",
+  "design_thinking",
 ];
 
 function DraftsPage() {
@@ -91,12 +119,30 @@ function DraftsPage() {
   const [statusFilter, setStatusFilter] = useState<PostStatus | "all">("draft");
   const [genCategory, setGenCategory] = useState<PostCategory>("founder_insight");
   const [genPlatforms, setGenPlatforms] = useState<GenPlatform[]>(["linkedin"]);
+  const [threadsEnabled, setThreadsEnabled] = useState(false);
+  const [instagramEnabled, setInstagramEnabled] = useState(false);
   const [error, setError] = useState("");
   const [flash, setFlash] = useState("");
+
+  const platformOptions = [
+    ...GEN_PLATFORMS,
+    ...(threadsEnabled ? [THREADS_PLATFORM] : []),
+    ...(instagramEnabled ? [INSTAGRAM_PLATFORM] : []),
+  ];
 
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
   }, [authLoading, session, router]);
+
+  useEffect(() => {
+    if (!session) return;
+    apiGet<{ enabled: boolean }>("/auth/threads/status")
+      .then((s) => setThreadsEnabled(!!s.enabled))
+      .catch(() => setThreadsEnabled(false));
+    apiGet<{ enabled: boolean }>("/auth/instagram/status")
+      .then((s) => setInstagramEnabled(!!s.enabled))
+      .catch(() => setInstagramEnabled(false));
+  }, [session]);
 
   const fetchPosts = useCallback(async () => {
     if (!session) return;
@@ -200,7 +246,7 @@ function DraftsPage() {
               ))}
             </select>
             <div className="flex flex-wrap gap-2">
-              {GEN_PLATFORMS.map((p) => {
+              {platformOptions.map((p) => {
                 const on = genPlatforms.includes(p.id);
                 return (
                   <button

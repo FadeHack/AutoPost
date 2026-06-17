@@ -86,6 +86,12 @@ _DEFAULT_TEMPLATE_BY_CATEGORY: dict[PostCategory, str] = {
     PostCategory.startup_opinion: "quote_card",
     PostCategory.technical_humor: "insight_card",
     PostCategory.carousel: "carousel_slide",
+    # Phase 12 Chunk B — new categories. (.get() already falls back to
+    # insight_card, but explicit mappings give each a sensible default visual.)
+    PostCategory.dev_tooling: "quote_card",  # engineering-leaning, like engineering_lesson
+    PostCategory.pricing_business_model: "metric_card",  # numbers-heavy; metric→insight fallback below if no real metric
+    PostCategory.product_postmortem: "quote_card",
+    PostCategory.design_thinking: "insight_card",
 }
 
 

@@ -10,8 +10,10 @@ from app.models.base import Base, TimestampMixin, UserRole
 
 if TYPE_CHECKING:
     from app.models.bluesky_account import BlueskyAccount
+    from app.models.instagram_account import InstagramAccount
     from app.models.linkedin_account import LinkedInAccount
     from app.models.mastodon_account import MastodonAccount
+    from app.models.threads_account import ThreadsAccount
 
 
 class User(Base, TimestampMixin):
@@ -36,6 +38,14 @@ class User(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     mastodon_accounts: Mapped[list["MastodonAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    threads_accounts: Mapped[list["ThreadsAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    instagram_accounts: Mapped[list["InstagramAccount"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

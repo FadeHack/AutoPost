@@ -11,6 +11,11 @@ Posting:
 - Bluesky has no document/carousel construct, so anything past 4 images is
   truncated (the orchestrator pre-warns on this at approve time via
   `max_images=4`).
+- Hashtags: unlike Mastodon/Instagram (which parse `#tags` from the text
+  server-side) and LinkedIn (auto-links them), atproto renders `#tags` as plain
+  grey text unless they're attached as `app.bsky.richtext.facet#tag` facets. We
+  reparse the commentary through `client_utils.TextBuilder` (`_build_richtext`)
+  so the tags the generator produced are real, clickable/searchable.
 
 Char limit: 300 grapheme clusters, enforced server-side. We gate at the
 orchestrator before calling in; if a draft body exceeds 300, the target
@@ -20,6 +25,7 @@ moves to `failed` with a clear error.
 from __future__ import annotations
 
 import asyncio
+import re
 from typing import Any
 
 import httpx
@@ -46,6 +52,37 @@ BLUESKY_CHAR_LIMIT = 300
 
 # Image cap per post.
 BLUESKY_MAX_IMAGES = 4
+
+# Hashtag token. On atproto a `#tag` is plain grey text unless it's attached as
+# an `app.bsky.richtext.facet#tag` facet (byte-offset range). We parse the
+# commentary the generator already produced (lowercase `#tags` at the end) and
+# rebuild it through TextBuilder so the tags are real, clickable/searchable.
+# `\w` (unicode) matches our generated tags; pure-numeric tokens are skipped so
+# "#1" stays plain text rather than producing an invalid tag facet.
+_HASHTAG_RE = re.compile(r"#(\w+)", re.UNICODE)
+
+
+def _build_richtext(text: str) -> tuple[Any, bool]:
+    """Return (TextBuilder, has_tags). When no real hashtag is present, has_tags
+    is False and the caller should send the plain string (cheaper, and keeps the
+    no-tag path byte-for-byte identical to before facets existed)."""
+    from atproto import client_utils  # type: ignore[import-untyped]
+
+    builder = client_utils.TextBuilder()
+    pos = 0
+    has_tags = False
+    for m in _HASHTAG_RE.finditer(text):
+        tag_value = m.group(1)
+        if tag_value.isdigit():
+            continue  # not a real hashtag — leave it in the surrounding text run
+        if m.start() > pos:
+            builder.text(text[pos : m.start()])
+        builder.tag(m.group(0), tag_value)  # display "#ai", facet value "ai"
+        pos = m.end()
+        has_tags = True
+    if has_tags and pos < len(text):
+        builder.text(text[pos:])
+    return builder, has_tags
 
 
 async def _download_png(public_url: str) -> bytes:
@@ -97,23 +134,29 @@ class BlueskyPublisher(Publisher):
             alt = (post.hook or "Image")[:300]
             image_blobs.append((png, alt))
 
+        # Promote `#tags` in the text to real Bluesky facets. Falls back to the
+        # plain string when there are no tags (unchanged behavior).
+        rich, has_tags = _build_richtext(commentary)
+        text_arg: Any = rich if has_tags else commentary
+
         def _do_publish() -> tuple[str, dict[str, Any]]:
             client = Client()
             client.login(handle, app_password)
             try:
                 if not image_blobs:
-                    resp = client.send_post(text=commentary)
-                    raw = {"text": commentary, "images": 0}
+                    resp = client.send_post(text=text_arg)
+                    raw = {"text": commentary, "images": 0, "faceted_tags": has_tags}
                 else:
                     # send_images signature: text, images=[(bytes, alt), ...]
                     resp = client.send_images(
-                        text=commentary,
+                        text=text_arg,
                         images=[png for png, _ in image_blobs],
                         image_alts=[alt for _, alt in image_blobs],
                     )
                     raw = {
                         "text": commentary,
                         "images": len(image_blobs),
+                        "faceted_tags": has_tags,
                     }
                 return _build_external_urn(resp), raw
             finally:

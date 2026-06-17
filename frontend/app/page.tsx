@@ -27,6 +27,22 @@ type MastodonStatus = {
   display_name: string | null;
 };
 
+type ThreadsStatus = {
+  enabled: boolean;
+  connected: boolean;
+  username: string | null;
+  display_name: string | null;
+  expires_at: string | null;
+};
+
+type InstagramStatus = {
+  enabled: boolean;
+  connected: boolean;
+  username: string | null;
+  account_type: string | null;
+  expires_at: string | null;
+};
+
 type TokenExpiry = {
   level: "ok" | "amber" | "red";
   title: string;
@@ -90,11 +106,26 @@ function Dashboard() {
   const [mastoInstance, setMastoInstance] = useState("");
   const [mastoConnecting, setMastoConnecting] = useState(false);
   const [mastoError, setMastoError] = useState("");
+  // Threads is Meta-gated — the backend reports `enabled` (PLATFORM_THREADS_ENABLED).
+  // When disabled the whole section is hidden. Connect is a LinkedIn-style redirect.
+  const [threadsStatus, setThreadsStatus] = useState<ThreadsStatus | null>(null);
+  const [threadsLoading, setThreadsLoading] = useState(true);
+  const [threadsConnecting, setThreadsConnecting] = useState(false);
+  const [threadsError, setThreadsError] = useState("");
+  // Instagram is Meta-gated — same shape as Threads (Instagram Login redirect).
+  const [instagramStatus, setInstagramStatus] = useState<InstagramStatus | null>(null);
+  const [instagramLoading, setInstagramLoading] = useState(true);
+  const [instagramConnecting, setInstagramConnecting] = useState(false);
+  const [instagramError, setInstagramError] = useState("");
 
   const linkedInResult = searchParams.get("linkedin");
   const linkedInMessage = searchParams.get("message");
   const mastodonResult = searchParams.get("mastodon");
   const mastodonMessage = searchParams.get("message");
+  const threadsResult = searchParams.get("threads");
+  const threadsMessage = searchParams.get("message");
+  const instagramResult = searchParams.get("instagram");
+  const instagramMessage = searchParams.get("message");
 
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
@@ -133,6 +164,106 @@ function Dashboard() {
       )
       .finally(() => setMastoLoading(false));
   }, [session, mastodonResult]);
+
+  useEffect(() => {
+    if (!session) return;
+    setThreadsLoading(true);
+    apiGet<ThreadsStatus>("/auth/threads/status")
+      .then(setThreadsStatus)
+      .catch(() =>
+        setThreadsStatus({
+          enabled: false,
+          connected: false,
+          username: null,
+          display_name: null,
+          expires_at: null,
+        })
+      )
+      .finally(() => setThreadsLoading(false));
+  }, [session, threadsResult]);
+
+  useEffect(() => {
+    if (!session) return;
+    setInstagramLoading(true);
+    apiGet<InstagramStatus>("/auth/instagram/status")
+      .then(setInstagramStatus)
+      .catch(() =>
+        setInstagramStatus({
+          enabled: false,
+          connected: false,
+          username: null,
+          account_type: null,
+          expires_at: null,
+        })
+      )
+      .finally(() => setInstagramLoading(false));
+  }, [session, instagramResult]);
+
+  const connectInstagram = async () => {
+    setInstagramConnecting(true);
+    setInstagramError("");
+    try {
+      const { authorize_url } = await apiGet<{ authorize_url: string }>(
+        "/auth/instagram/start"
+      );
+      window.location.href = authorize_url;
+    } catch (e) {
+      setInstagramError(e instanceof ApiError ? e.body : (e as Error).message);
+      setInstagramConnecting(false);
+    }
+  };
+
+  const disconnectInstagram = async () => {
+    if (
+      !confirm(
+        "Disconnect Instagram? Any scheduled Instagram publishes will fail."
+      )
+    )
+      return;
+    try {
+      await apiDelete("/auth/instagram/disconnect");
+      setInstagramStatus({
+        enabled: true,
+        connected: false,
+        username: null,
+        account_type: null,
+        expires_at: null,
+      });
+    } catch (e) {
+      setInstagramError(e instanceof ApiError ? e.body : (e as Error).message);
+    }
+  };
+
+  const connectThreads = async () => {
+    setThreadsConnecting(true);
+    setThreadsError("");
+    try {
+      const { authorize_url } = await apiGet<{ authorize_url: string }>(
+        "/auth/threads/start"
+      );
+      window.location.href = authorize_url;
+    } catch (e) {
+      setThreadsError(e instanceof ApiError ? e.body : (e as Error).message);
+      setThreadsConnecting(false);
+    }
+  };
+
+  const disconnectThreads = async () => {
+    if (!confirm("Disconnect Threads? Any scheduled Threads publishes will fail."))
+      return;
+    try {
+      await apiDelete("/auth/threads/disconnect");
+      setThreadsStatus({
+        enabled: true,
+        connected: false,
+        username: null,
+        display_name: null,
+        expires_at: null,
+      });
+    } catch (e) {
+      setThreadsError(e instanceof ApiError ? e.body : (e as Error).message);
+    }
+  };
 
   const connectMastodon = async () => {
     setMastoConnecting(true);
@@ -246,6 +377,28 @@ function Dashboard() {
           <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
             Mastodon error:{" "}
             <span className="font-mono text-xs">{mastodonMessage}</span>
+          </div>
+        )}
+        {threadsResult === "connected" && (
+          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
+            Threads connected.
+          </div>
+        )}
+        {threadsResult === "error" && (
+          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
+            Threads error:{" "}
+            <span className="font-mono text-xs">{threadsMessage}</span>
+          </div>
+        )}
+        {instagramResult === "connected" && (
+          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
+            Instagram connected.
+          </div>
+        )}
+        {instagramResult === "error" && (
+          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
+            Instagram error:{" "}
+            <span className="font-mono text-xs">{instagramMessage}</span>
           </div>
         )}
         {expiry && expiry.level !== "ok" && (
@@ -482,6 +635,111 @@ function Dashboard() {
           )}
         </section>
 
+        {!threadsLoading && threadsStatus?.enabled && (
+          <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
+            <h2 className="text-lg font-semibold mb-4">Threads</h2>
+            {threadsStatus.connected ? (
+              <div className="space-y-3">
+                <p className="text-sm">
+                  Connected as{" "}
+                  <span className="font-medium">@{threadsStatus.username}</span>
+                  {threadsStatus.display_name && (
+                    <span className="text-zinc-500">
+                      {" "}
+                      ({threadsStatus.display_name})
+                    </span>
+                  )}
+                </p>
+                {threadsStatus.expires_at && (
+                  <p className="text-xs text-zinc-500">
+                    Token expires:{" "}
+                    {new Date(threadsStatus.expires_at).toLocaleString()}
+                  </p>
+                )}
+                <button
+                  onClick={disconnectThreads}
+                  className="text-xs text-zinc-400 hover:text-white underline"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-zinc-500">
+                  Threads uses Meta&apos;s OAuth. You&apos;ll be redirected to
+                  authorize, then back here.
+                </p>
+                <button
+                  onClick={connectThreads}
+                  disabled={threadsConnecting}
+                  className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200 disabled:opacity-50"
+                >
+                  {threadsConnecting ? "Redirecting…" : "Connect Threads"}
+                </button>
+              </div>
+            )}
+            {threadsError && (
+              <p className="text-red-400 text-xs mt-4 font-mono break-all">
+                {threadsError}
+              </p>
+            )}
+          </section>
+        )}
+
+        {!instagramLoading && instagramStatus?.enabled && (
+          <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
+            <h2 className="text-lg font-semibold mb-4">Instagram</h2>
+            {instagramStatus.connected ? (
+              <div className="space-y-3">
+                <p className="text-sm">
+                  Connected as{" "}
+                  <span className="font-medium">
+                    @{instagramStatus.username}
+                  </span>
+                  {instagramStatus.account_type && (
+                    <span className="text-zinc-500">
+                      {" "}
+                      ({instagramStatus.account_type.toLowerCase()})
+                    </span>
+                  )}
+                </p>
+                {instagramStatus.expires_at && (
+                  <p className="text-xs text-zinc-500">
+                    Token expires:{" "}
+                    {new Date(instagramStatus.expires_at).toLocaleString()}
+                  </p>
+                )}
+                <button
+                  onClick={disconnectInstagram}
+                  className="text-xs text-zinc-400 hover:text-white underline"
+                >
+                  Disconnect
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                <p className="text-xs text-zinc-500">
+                  Instagram uses Meta&apos;s OAuth (Instagram Login). Requires a
+                  Creator/Business account. You&apos;ll be redirected to
+                  authorize, then back here.
+                </p>
+                <button
+                  onClick={connectInstagram}
+                  disabled={instagramConnecting}
+                  className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200 disabled:opacity-50"
+                >
+                  {instagramConnecting ? "Redirecting…" : "Connect Instagram"}
+                </button>
+              </div>
+            )}
+            {instagramError && (
+              <p className="text-red-400 text-xs mt-4 font-mono break-all">
+                {instagramError}
+              </p>
+            )}
+          </section>
+        )}
+
         <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
           <h2 className="text-lg font-semibold mb-1">Trends</h2>
           <p className="text-sm text-zinc-500 mb-4">
@@ -537,15 +795,6 @@ function Dashboard() {
           </Link>
         </section>
 
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6 text-sm text-zinc-500">
-          <h2 className="text-base font-semibold text-zinc-300 mb-2">
-            Coming soon
-          </h2>
-          <p>
-            Publishing worker (Phase 6) and analytics (Phase 7) will appear
-            here as they land.
-          </p>
-        </section>
       </div>
     </main>
   );

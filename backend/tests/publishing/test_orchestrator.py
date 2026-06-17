@@ -364,3 +364,68 @@ async def test_publish_target_auth_error_forces_refresh_then_succeeds(patched):
     assert result.status == TargetStatus.published
     assert result.external_urn == "urn:li:share:AFTER"
     assert call_count["n"] == 2
+
+
+# ---------------------------------------------------------------------------
+# Phase 11 Chunk E — multi-platform fan-out (code-level E2E)
+# ---------------------------------------------------------------------------
+
+
+async def test_fan_out_persists_distinct_urns_per_platform(monkeypatch):
+    """One draft → LinkedIn + Bluesky targets → each publishes and persists its
+    own external_urn. The code-level stand-in for the live multi-platform E2E:
+    proves dispatch + per-target persistence are platform-independent."""
+
+    class _PlatformPublisher(Publisher):
+        platform = Platform.linkedin  # overridden per-instance below
+        char_limit = 3000
+        max_images = 20
+
+        def __init__(self, urn):
+            self._urn = urn
+
+        async def publish(self, **_):  # type: ignore[override]
+            return PublishResult(external_urn=self._urn, raw_request={"text": "x"})
+
+    urns = {
+        Platform.linkedin: "urn:li:share:LI",
+        Platform.bluesky: "at://did:plc:x/app.bsky.feed.post/BSKY",
+    }
+    # The orchestrator does `get_publisher_class(platform)()`, so return a
+    # zero-arg factory that closes over the right per-platform urn.
+    monkeypatch.setattr(
+        orchestrator,
+        "get_publisher_class",
+        lambda platform: (lambda: _PlatformPublisher(urns[platform])),
+    )
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_account",
+        AsyncMock(return_value=SimpleNamespace(id=uuid4(), refresh_token=None)),
+    )
+    monkeypatch.setattr(
+        orchestrator, "_select_publish_assets", AsyncMock(return_value=[])
+    )
+    monkeypatch.setattr(orchestrator.asyncio, "sleep", AsyncMock())
+
+    post = _fake_post()
+    li_target = _fake_target(post=post, platform=Platform.linkedin)
+    bsky_target = _fake_target(
+        post=post, platform=Platform.bluesky, commentary="short bsky variant"
+    )
+
+    li_result = await orchestrator.publish_target(
+        _make_session(target=li_target, post=post, other_targets=[bsky_target]),
+        li_target.id,
+    )
+    bsky_result = await orchestrator.publish_target(
+        _make_session(target=bsky_target, post=post, other_targets=[li_target]),
+        bsky_target.id,
+    )
+
+    assert li_result.status == TargetStatus.published
+    assert li_result.external_urn == "urn:li:share:LI"
+    assert bsky_result.status == TargetStatus.published
+    assert bsky_result.external_urn.endswith("/BSKY")
+    # Distinct URNs persisted per platform — no cross-contamination.
+    assert li_result.external_urn != bsky_result.external_urn

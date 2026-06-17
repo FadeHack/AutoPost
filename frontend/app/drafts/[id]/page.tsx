@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
 import DraftEditor from "@/components/DraftEditor";
-import LinkedInPreview from "@/components/LinkedInPreview";
+import PlatformPreview from "@/components/PlatformPreview";
 import SchedulePicker from "@/components/SchedulePicker";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 
@@ -23,7 +23,11 @@ type PostCategory =
   | "ai_automation"
   | "startup_opinion"
   | "technical_humor"
-  | "carousel";
+  | "carousel"
+  | "dev_tooling"
+  | "pricing_business_model"
+  | "product_postmortem"
+  | "design_thinking";
 
 type PostExtracts = {
   pull_quote: string | null;
@@ -132,6 +136,10 @@ const CATEGORY_LABEL: Record<PostCategory, string> = {
   startup_opinion: "Startup opinion",
   technical_humor: "Technical humor",
   carousel: "Carousel",
+  dev_tooling: "Dev tooling",
+  pricing_business_model: "Pricing & business model",
+  product_postmortem: "Product postmortem",
+  design_thinking: "Design thinking",
 };
 
 const CATEGORY_COLORS: Record<PostCategory, string> = {
@@ -141,6 +149,10 @@ const CATEGORY_COLORS: Record<PostCategory, string> = {
   startup_opinion: "border-amber-700 text-amber-300 bg-amber-950/30",
   technical_humor: "border-pink-700 text-pink-300 bg-pink-950/30",
   carousel: "border-zinc-700 text-zinc-300 bg-zinc-950/30",
+  dev_tooling: "border-teal-700 text-teal-300 bg-teal-950/30",
+  pricing_business_model: "border-lime-700 text-lime-300 bg-lime-950/30",
+  product_postmortem: "border-rose-700 text-rose-300 bg-rose-950/30",
+  design_thinking: "border-fuchsia-700 text-fuchsia-300 bg-fuchsia-950/30",
 };
 
 const STATUS_COLORS: Record<PostStatus, string> = {
@@ -675,9 +687,9 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
 
             <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
               <h2 className="text-xs uppercase tracking-wider text-zinc-500 mb-4">
-                LinkedIn preview
+                Preview
               </h2>
-              <LinkedInPreview
+              <PlatformPreview
                 hook={post.hook}
                 body={post.body}
                 tags={post.tags}
@@ -687,6 +699,10 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
                     ? currentCarousel.map((a) => ({ url: a.image_url }))
                     : null
                 }
+                targets={post.targets.map((t) => ({
+                  platform: t.platform,
+                  commentary: t.commentary,
+                }))}
                 authorName={session.user.email?.split("@")[0] ?? "You"}
               />
             </section>
