@@ -6,7 +6,8 @@ Auto-loaded by Claude on every session inside this repo. Imperative rules — wh
 1. `CLAUDE.md` (this file) — the rules
 2. `CHECKLIST.md` — what's done, what's next
 3. `CONTEXT.md` — current architecture
-4. `INSTRUCTIONS.md` — only if you need to run something
+4. `DESIGN.md` — the locked UI/UX direction (read before any `frontend/` work)
+5. `INSTRUCTIONS.md` — only if you need to run something
 
 ---
 
@@ -27,7 +28,7 @@ Do not swap these without explicit user approval.
 - **Backend**: FastAPI + SQLAlchemy + Alembic. Async by default.
 - **Scheduler**: APScheduler, in-process, with `SQLAlchemyJobStore` backed by Postgres. Started in FastAPI lifespan hook.
 - **Database**: Supabase (managed Postgres) on the free tier. **Always use the Session Pooler URL on port 5432** — for both Alembic migrations AND app queries. The Transaction Pooler (port 6543) breaks Alembic advisory locks; never use it.
-- **Frontend**: Next.js (App Router) + TailwindCSS.
+- **Frontend**: Next.js (App Router) + TailwindCSS. **UI/UX follows `DESIGN.md`** — the studio mirrors the rendered-card identity (minimal-dark + serif display), a left-rail IA with a brand switcher (multi-company seam), the pipeline rendered literally (Today funnel / Drafts board / Calendar), and the three-pane draft cockpit. Every screen is fully responsive. Do not drift back toward a generic card-wall dashboard or a SaaS electric-blue accent; do not add a new top-level screen or nav pattern without reconciling it against `DESIGN.md` (and updating that file in the same change).
 - **Auth**: Supabase Auth (email magic link) on the dashboard. Backend verifies Supabase JWTs via JWKS.
 - **LinkedIn**: single dev app, 3-legged OAuth + refresh, posting as the authenticated **member** (`urn:li:person:...`). Tokens encrypted at rest with Fernet. Endpoint: `/rest/posts` with `LinkedIn-Version: YYYYMM` header (NOT the deprecated `/v2/ugcPosts`).
 - **Local Python**: `venv` in `backend/venv/`, activated via `source backend/venv/bin/activate`.

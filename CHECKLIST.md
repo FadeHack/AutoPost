@@ -545,7 +545,87 @@ Original (deferred) scope, kept for reference:
 - [ ] **E2E matrix smoke (user-driven, live):** generate `dev_tooling` for Bluesky → short punchy output; same category for LinkedIn → 140–220-word post. Needs live Groq tokens + trends in the pool; the matrix *dispatch* is proven at the code level (`test_prompt_matrix.py` + `TestBuildPlatformCommentary`), the subjective output-length check goes live with a real generation.
 
 ### Chunk E — Custom categories (deferred)
-- [ ] Admin UI for runtime-defined categories is **deferred to a future Phase 13** if real demand surfaces. Seeded-via-migration keeps voice quality controlled by anchor examples; a free-form UI risks generic AI-spam output (violates CLAUDE.md philosophy). No schema change needed later — prompts table is already data-driven, so when/if this lands it's a UI + write endpoint, not a refactor.
+- [ ] Admin UI for runtime-defined categories is **deferred** if real demand surfaces. Seeded-via-migration keeps voice quality controlled by anchor examples; a free-form UI risks generic AI-spam output (violates CLAUDE.md philosophy). No schema change needed later — prompts table is already data-driven, so when/if this lands it's a UI + write endpoint, not a refactor. (When it lands it likely rides inside Phase 13's **Settings → Prompts** surface.)
+
+---
+
+## Phase 13 — UI/UX Redesign (AutoPost — by Nestwhirr) ✅ (chunks A–I code-complete 2026-06-23; browser e2e user-driven)
+
+Target spec lives in **`DESIGN.md`** (the why + shape — read it first). This section is the *progress tracker only*; do not duplicate the spec here. Chunks mirror `DESIGN.md §Build order`. Each chunk: land it, tick it, then record the architecture delta in `CONTEXT.md`.
+
+**Direction (locked 2026-06-22):** single-operator editorial cockpit, not a SaaS dashboard. Studio mirrors the rendered-card identity (minimal-dark + serif display). Left-rail IA with a brand switcher (multi-company seam, now). Pipeline rendered literally (Today funnel / Drafts board / Calendar). Three-pane draft cockpit. **Fully responsive.** App name brand-neutral ("AutoPost"); "Nestwhirr" only as vendor + selected brand.
+
+### Chunk A — App shell + design tokens (`DESIGN.md §2, §3`) ✅ (2026-06-22, code-complete; browser e2e user-driven)
+- [x] Rewrote `frontend/app/globals.css` — dropped the Next.js light/dark + Arial boilerplate; installed the Tailwind-v4 `@theme` token set (surface/ink/parchment-accent/pipeline-status) + the serif **system** stack (`ui-serif, Georgia…` — matches the cards verbatim, no webfont) / Geist-sans / Geist-mono. Dark-only, `color-scheme: dark`, hairline scrollbars.
+- [x] Persistent left-rail nav (`components/shell/NavRail.tsx`) — Today/Inbox/Drafts/Calendar/Published/Settings, inline line-art glyphs (no emoji), active state via `usePathname`, **"needs me" badges** (Inbox = unconsumed trends, Drafts = draft+failed, fetched once per shell mount, silent-fail).
+- [x] Brand/workspace switcher (`components/shell/BrandSwitcher.tsx`) at rail top — single static "Nestwhirr" entry + "Add brand — coming soon"; the multi-company seam is the deliverable (real tenancy = Phase 14).
+- [x] Global token-health pill (`components/shell/TokenHealthPill.tsx`) — `tokenExpiry()` extracted to `lib/tokenExpiry.ts` (shared with the future Today screen); silent >10d, amber ≤10d, red ≤3d, Reconnect CTA. Collapses to a single dot on the icon-rail.
+- [x] Responsive shell (`components/shell/AppShell.tsx`): full rail ≥1280px → icon-only rail 768–1280 (driven by a `matchMedia` hook, SSR-safe since the rail only renders for an authenticated session) → bottom tab bar <768 (`MobileTabBar`, drops Settings to stay at 5 thumbs). `/login` + unauthenticated state render bare. Wired into root `layout.tsx`; uses a `<div>` content column (pages keep their own `<main>`). `/settings` stub added so the nav link resolves pre-Chunk-I.
+- [x] `npx tsc --noEmit` clean.
+- [ ] **Browser e2e (user-driven):** sign in → rail + brand switcher + badges render; resize to confirm full→icon→bottom-bar tiers; `/login` shows no rail; token pill appears amber/red when the LinkedIn token is near expiry.
+
+### Chunk B — Component kit (`DESIGN.md §4`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Single source of truth `lib/domain.ts` — `PostStatus`/`PostCategory`/`Platform` types + `CATEGORY_LABEL` + `GENERATABLE` + `PLATFORM_LABEL` + `PLATFORM_LIMITS`. Kills the type/label/cap duplication that lived in every list page.
+- [x] `StatusPill` (`components/ui/StatusPill.tsx`) — semantic pipeline-status tokens, literal per-status class map (Tailwind v4 can't see dynamic class names), single status dot (publishing pulses). **Consolidation done:** `drafts`, `scheduled`, `published` migrated to `StatusPill` + `CategoryChip` + `lib/domain` imports; their local `CATEGORY_COLORS`/`STATUS_COLORS` rainbow maps deleted. `drafts/[id]` intentionally left — Chunk C rewrites it as the cockpit, so migrating it now would be thrown away.
+- [x] `CategoryChip` (`components/ui/CategoryChip.tsx`) — **neutral hairline chip, not rainbow** (editorial restraint; colour is reserved for pipeline state). Reads `CATEGORY_LABEL`.
+- [x] `PlatformBadge` + `PlatformTab` (`components/ui/PlatformBadge.tsx`) — per-platform identity; a platform's hue is real brand identity (small colored dot) with neutral chrome. `PlatformTab` is the cockpit tab-strip button (Chunk C).
+- [x] `CharBudgetMeter` (`components/ui/CharBudgetMeter.tsx`) — thin track filling toward the cap, accent → amber (≥85%) → red (over), reads `PLATFORM_LIMITS`.
+- [x] `VoiceQualityChip` (`components/ui/VoiceQualityChip.tsx`) — presentational; green "Voice clean" / amber "N tells" (+polished). The live client-side scanner feeding it lands in Chunk C.
+- [x] `Banner` + `ToastProvider`/`useToast` (`components/ui/Banner.tsx`, `Toast.tsx`) — one inline-alert component, four tones on the semantic tokens; toasts built on Banner, mounted once by `AppShell`. Replaces the pattern of the ~8 hand-rolled banners.
+- [x] `ActionBar` + `ActionButton` (`components/ui/ActionBar.tsx`) — sticky action-row container + variant buttons (primary=parchment accent, secondary, danger, ghost) with loading spinner; Chunk C composes the real Edit/Render/Approve/Schedule/Publish bar.
+- [x] `CommandBar` (`components/shell/CommandBar.tsx`) — global ⌘K/Ctrl-K palette: filterable nav jumps + safe actions (generate→drafts, refresh trends→`/trends/refresh` with a toast), arrow/enter keyboard nav. Mounted in `AppShell`.
+- [x] `npx tsc --noEmit` clean.
+- [ ] **Browser e2e (user-driven):** ⌘K opens/filters/navigates; status pills + neutral category chips render on drafts/scheduled/published; a toast appears on "Refresh trends".
+
+### Chunk C — Draft Review Cockpit (`DESIGN.md §5C`) — **the proving vertical slice** ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Three-pane layout (Editor · Platform Preview center · Rail) replacing the stacked `/drafts/[id]` sections. Grid `[0.95fr · 1.35fr · clamp(280px,24vw,360px)]` at `lg`; tablet two-pane toggle (`md`); mobile stacks preview-first → editor → rail.
+- [x] Editor pane: live client-side voice flagging via new `lib/voice.ts` (mirrors `strip_ai_tells` phrase list 1:1) + `HighlightField` overlay (transparent textarea on a highlighted backdrop → wavy-red underlines that never drift off the caret). Serif hook. Inline tell list + `VoiceQualityChip` (count = distinct tells, matching backend `len(violations)`).
+- [x] Preview pane (center): `PlatformPreview` promoted + refactored onto the kit — always-on `PlatformTab` strip + `CharBudgetMeter`; over-cap → `Banner` pointing at per-platform generation. Reads the **live** working copy so an edit shows its per-platform consequence immediately.
+- [x] Rail: status/category/targets + Visual render slot + template picker + carousel strip (Phase-4 Chunk-G batch logic preserved) + failed-panel/retry/attempt-history.
+- [x] Sticky status-aware `ActionBar` (Save/Approve/Schedule/Publish/Retry/Delete, `confirm()` on publish-now + lossy reverts; success → toasts). Inline editing replaces the old Edit-mode toggle; working copy lifts to the page so editor + preview stay in sync.
+- [x] Responsive: stacks preview-first → editor → sticky ActionBar on mobile; tablet pane toggle.
+- [x] `tsc --noEmit` clean; new components (`voice.ts`, `HighlightField`, `PlatformPreview`) lint clean. (Page keeps the pre-existing data-fetch `set-state-in-effect` baseline shared by every list page.)
+
+### Chunk D — Today (command center) (`DESIGN.md §5A`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Replaced the home card-wall (`app/page.tsx`): token-health band (amber/red only, reuses `lib/tokenExpiry`) + 3 worklist counters (Needs review / Scheduled / Published-7d, deep-linked) + pipeline funnel strip (Inbox → Draft → Approved → Scheduled → Live, each a deep-link with live counts) + fresh-trends peek (top 5 unconsumed) + primary "Generate a draft" CTA. Surfaces the `?<platform>=connected|error` OAuth callback (callbacks still land on `/`) as a dismissible Banner.
+- [x] **Connections relocated early** (necessary so Today can shed the card-wall without stranding platform setup): the 5 connection sections moved verbatim into `components/settings/Connections.tsx`, rendered by `app/settings/page.tsx` with a Connections·Prompts·Templates·Voice sub-nav (latter three shown "soon" — Chunk I). This satisfies Chunk I's first bullet ahead of schedule.
+- [x] `tsc --noEmit` clean. Render kept pure (clock snapshotted once via lazy `useState`); only the shared data-fetch `set-state-in-effect` baseline remains in lint.
+
+### Chunk E — Drafts pipeline board (`DESIGN.md §5D`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Status-column board (Draft/Approved/Scheduled/Published) replacing the flat `/drafts` list; cards show hook (serif) + category + platform badges + voice chip; failed = red + retry.
+  - Four columns map 1:1 to the lifecycle: `publishing` rides the Scheduled column (in-flight), `failed` rides the Published column rendered red with a Retry button (`POST /posts/{id}/retry`). Every `PostStatus` stays visible across four columns.
+  - Voice chip per card via the client `scanVoiceTells` mirror (`lib/voice.ts`), violations computed once in a `useMemo` bucketing pass so cards stay presentational.
+  - Generate strip kept at the top of the board (restyled to tokens) — Today's "Generate a draft" CTA lands here. Delete affordance on draft/failed cards; optimistic remove + toast.
+  - Responsive: `grid-cols-1 sm:grid-cols-2 xl:grid-cols-4` (mobile stacked → tablet 2×2 → desktop 4 across).
+
+### Chunk F — Calendar (`DESIGN.md §5E`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Week/month grid replacing the flat `/scheduled` list; platform-colored blocks; drag-to-reschedule through the idempotent `/schedule` endpoint; mobile → agenda list.
+  - Month/Week view toggle + ‹ Today › navigator. Month = 6×7 grid (off-month days dimmed); Week = 7 tall columns. Today ringed; past days dimmed and drop-disabled.
+  - Blocks are native-draggable (HTML5 DnD, no new dep); left accent bar = primary platform color (`PLATFORM_DOT` now exported from `PlatformBadge`). Drag to another day reschedules **preserving time-of-day**, optimistic update + `POST /posts/{id}/schedule` (idempotent `replace_existing`), reverts on error. Client guard rejects slots < `now + 60s` (backend `MIN_SCHEDULE_LEAD_SECONDS`).
+  - Right rail "Next up" = chronological scheduled list (preserves the old next-up-first sort). Empty-cell hover "+" deep-links to `/drafts` (generate-into-slot affordance).
+  - Responsive: grid is `hidden md:block`; on mobile the "Next up" rail becomes the full-width agenda. Route stays `/scheduled` (NavRail already labels it "Calendar").
+
+### Chunk G — Inbox (Trends) (`DESIGN.md §5B`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Evolve `/trends` into a dense triage list; keyboard nav (`j/k`, `e`, `g`); per-row **Generate →** deep-link into the cockpit with the trend pre-selected.
+  - Dense email-triage rows (not cards): left filter strip (Status · Source as button lists), source-coded dot + HN score + relative age, optimistic consume toggle kept, per-row delete on hover.
+  - Keyboard: `j/k`+arrows move a cursor (active row tinted, scrolls into view), `e` consume, `g` generate-from-row, `⏎` open source URL. Window listener ignores form-control focus + modifier keys.
+  - **Generate →** deep-links to `/drafts?trend=<id>&t=<title>`. The board's generate strip (now `Suspense`-wrapped for `useSearchParams`) reads the pin, shows a dismissible "Generating from this trend" Banner, includes `trend_ids:[id]` in `POST /posts/generate`, and on success routes straight to the new draft's cockpit (`/drafts/<newId>`). Non-pinned generate keeps the old stay-on-board behavior.
+  - Refresh + filters preserved; toasts replace the old flash strip. tsc clean; only the baseline data-fetch `set-state-in-effect` lint remains.
+
+### Chunk H — Published (`DESIGN.md §5F`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Evolve `/published`: per-row fan-out targets + outcomes; reserved (empty) "Performance" column for the deferred Phase-7 analytics — no fake charts.
+  - Each row reads `post.targets[]`: one chip per platform with a status-coded outcome (published = ✓ / outbound ↗ where a public URL is reconstructable; failed = red "· failed" with the error in the tooltip). Partial fan-out shows the failed leg red alongside the live ones.
+  - Per-platform public links via a `targetUrl(platform, external_urn)` helper: LinkedIn (`/feed/update/{urn}`), Bluesky (`at://` → `bsky.app/profile/<did>/post/<rkey>`), Mastodon (the stored `uri`/`url` if http). Threads/Instagram store opaque media ids → outcome shown without a link. Legacy posts (only `linkedin_urn`, no targets) fall back to a single LinkedIn chip.
+  - Reserved **Performance** column: a real grid column with a header but an em-dash cell — signals the Phase-7 slot without faking metrics (`r_member_social` closed in 2026; tooltip says "deferred until Member Data Portability lands"). `sm:grid-cols-[1fr_150px]`; collapses to single column on mobile.
+
+### Chunk I — Settings (`DESIGN.md §5G`) ✅ (2026-06-23, code-complete; browser e2e user-driven)
+- [x] Move the 5 connection sections out of home into Settings → Connections (verbatim, keep Meta-gated `enabled` hiding). **Done early in Chunk D** (`components/settings/Connections.tsx`).
+- [x] Settings → Prompts (read/activate the versioned `prompts` table) + Templates + Voice rules surfaces.
+  - Settings is now tabbed via `?tab=` (Suspense-wrapped for `useSearchParams`): Connections · Prompts · Templates · Voice.
+  - **Backend (new):** `app/api/prompts.py` — `GET /prompts` (full matrix) + `POST /prompts/{id}/activate` (flips `is_active` within the (name, platform) group so the generator's lookup resolves to one live row; NULL-platform matched with `IS NULL`). Registered in `app/api/__init__.py`. Read + activate only — authoring bodies stays a migration concern (anchor examples hold voice quality). No schema change, no migration.
+  - **Prompts.tsx** — groups versions by (name, platform), highlights the live one, Activate buttons on the rest (optimistic flip + toast), collapsible body view.
+  - **Templates.tsx** — read-only grid over the existing `GET /templates` (no per-template `is_active`; selection is per-post at render). Thumbnail + name + category + html_path.
+  - **VoiceRules.tsx** — read-only reference: the `BANNED_PHRASES` list (same array that drives the cockpit's live flagging, imported from `lib/voice.ts`) + the structural/formatting rules from CLAUDE.md. Editing = code change, by design.
 
 ---
 
