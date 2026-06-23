@@ -1,26 +1,57 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+/*
+  AutoPost — by Nestwhirr · design tokens (DESIGN.md §3)
+  The studio wears the artifact's identity: near-black surfaces, hairline
+  borders, a warm parchment accent (the card's brand-strap tone — NOT SaaS
+  blue), and the exact system serif stack the rendered cards use.
+  Dark-only and intentional — no prefers-color-scheme boilerplate.
+*/
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* Surfaces */
+  --color-bg: #0a0a0b; /* near-black — the card background, echoed */
+  --color-surface-1: #0f0f11; /* raised panels */
+  --color-surface-2: #16161a; /* inputs, hover */
+  --color-border: #232328; /* hairline, low-contrast for calm density */
+
+  /* Ink */
+  --color-ink-hi: #f4f4f5; /* primary text */
+  --color-ink-mid: #a1a1aa; /* secondary */
+  --color-ink-lo: #52525b; /* metadata */
+
+  /* Accent — the "accent line above brand strap", parchment/paper-ink */
+  --color-accent: #e8e1d3;
+  --color-accent-ink: #0a0a0b; /* text on an accent fill */
+
+  /* Pipeline status (semantic, used sparingly) */
+  --color-status-draft: #a1a1aa; /* neutral */
+  --color-status-approved: #e8e1d3; /* parchment-accent */
+  --color-status-scheduled: #818cf8; /* indigo */
+  --color-status-publishing: #fbbf24; /* amber, pulsing in use */
+  --color-status-published: #34d399; /* emerald */
+  --color-status-failed: #f87171; /* red */
+
+  /* Type — serif DISPLAY matches the cards verbatim; sans/mono via next/font */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-serif: ui-serif, Georgia, "Times New Roman", serif;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html {
+  background: var(--color-bg);
+  color-scheme: dark;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-bg);
+  color: var(--color-ink-hi);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Calm, hairline scrollbars — part of the restraint, not an afterthought */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-border) transparent;
 }

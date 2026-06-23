@@ -5,25 +5,27 @@
  *
  * The operator picks a platform tab; we render that platform's card variant
  * (LinkedIn keeps its rich feed card via the existing LinkedInPreview; the
- * microblogs + Instagram get lighter variants) and an inline char-limit
- * warning when the text this platform would publish exceeds its cap.
+ * microblogs + Instagram get lighter variants) and a CharBudgetMeter for the
+ * text this platform would actually publish.
+ *
+ * In the cockpit (DESIGN.md §5C) this is the center pane — the visual center of
+ * gravity — and it reads the *live* working copy while you edit, so a word
+ * change shows its per-platform consequence immediately.
  *
  * Not pixel-perfect by design. The signal is: line breaks render, hashtags
  * read right, the image/carousel hangs where the real one will, and the
- * operator sees a char-limit problem BEFORE approving. The long-term fix for
- * over-cap bodies is per-platform generation (Phase 12), not truncation — the
- * warning says so.
+ * operator sees a char-budget problem BEFORE approving. The long-term fix for
+ * over-cap bodies is per-platform generation (Phase 12), not truncation.
  */
 
 import { useState } from "react";
 import LinkedInPreview from "@/components/LinkedInPreview";
+import { PlatformTab } from "@/components/ui/PlatformBadge";
+import { CharBudgetMeter } from "@/components/ui/CharBudgetMeter";
+import { Banner } from "@/components/ui/Banner";
+import { PLATFORM_LABEL, PLATFORM_LIMITS, type Platform } from "@/lib/domain";
 
-export type Platform =
-  | "linkedin"
-  | "bluesky"
-  | "mastodon"
-  | "threads"
-  | "instagram";
+export type { Platform };
 
 export type PreviewTarget = {
   platform: Platform;
@@ -41,32 +43,6 @@ type PlatformPreviewProps = {
   // Targets attached to this draft. Empty → preview LinkedIn canonical only.
   targets: PreviewTarget[];
   authorName?: string;
-};
-
-// Mirrors each Publisher.char_limit on the backend exactly — keep in sync.
-const PLATFORM_LIMITS: Record<Platform, number> = {
-  linkedin: 3000,
-  bluesky: 300,
-  mastodon: 500,
-  threads: 500,
-  instagram: 2200,
-};
-
-const PLATFORM_LABEL: Record<Platform, string> = {
-  linkedin: "LinkedIn",
-  bluesky: "Bluesky",
-  mastodon: "Mastodon",
-  threads: "Threads",
-  instagram: "Instagram",
-};
-
-// Tab accent per platform.
-const PLATFORM_ACCENT: Record<Platform, string> = {
-  linkedin: "border-sky-600 text-sky-300 bg-sky-950/30",
-  bluesky: "border-sky-500 text-sky-200 bg-sky-950/30",
-  mastodon: "border-violet-600 text-violet-300 bg-violet-950/30",
-  threads: "border-zinc-400 text-zinc-200 bg-zinc-800/50",
-  instagram: "border-pink-600 text-pink-300 bg-pink-950/30",
 };
 
 // Build the canonical hook+body+tags the same way the orchestrator does when a
@@ -181,43 +157,34 @@ export default function PlatformPreview({
   const effectiveTargets: PreviewTarget[] =
     targets.length > 0 ? targets : [{ platform: "linkedin", commentary: null }];
 
-  const [active, setActive] = useState<Platform>(
-    effectiveTargets[0].platform,
-  );
+  const [active, setActive] = useState<Platform>(effectiveTargets[0].platform);
+
+  // Derive the rendered platform at render time: if the target set changed
+  // (e.g. regenerate) and dropped the stored `active`, fall back to the first
+  // available one without a reconciling effect.
   const activeTarget =
     effectiveTargets.find((t) => t.platform === active) ?? effectiveTargets[0];
+  const activePlatform = activeTarget.platform;
 
   const canonical = buildCanonical(hook, body, tags);
   const text = activeTarget.commentary ?? canonical;
-  const cap = PLATFORM_LIMITS[active];
+  const cap = PLATFORM_LIMITS[activePlatform];
   const overCap = text.length > cap;
 
   return (
     <div className="space-y-3">
-      {effectiveTargets.length > 1 && (
-        <div className="flex flex-wrap gap-2">
-          {effectiveTargets.map((t) => {
-            const on = t.platform === active;
-            return (
-              <button
-                key={t.platform}
-                type="button"
-                onClick={() => setActive(t.platform)}
-                className={
-                  "rounded border px-3 py-1 text-xs font-medium transition " +
-                  (on
-                    ? PLATFORM_ACCENT[t.platform]
-                    : "border-zinc-700 text-zinc-400 hover:text-white")
-                }
-              >
-                {PLATFORM_LABEL[t.platform]}
-              </button>
-            );
-          })}
-        </div>
-      )}
+      <div className="flex flex-wrap gap-2">
+        {effectiveTargets.map((t) => (
+          <PlatformTab
+            key={t.platform}
+            platform={t.platform}
+            active={t.platform === activePlatform}
+            onClick={() => setActive(t.platform)}
+          />
+        ))}
+      </div>
 
-      {active === "linkedin" ? (
+      {activePlatform === "linkedin" ? (
         <LinkedInPreview
           hook={hook}
           body={body}
@@ -226,7 +193,7 @@ export default function PlatformPreview({
           carousel={carousel}
           authorName={authorName}
         />
-      ) : active === "instagram" ? (
+      ) : activePlatform === "instagram" ? (
         <InstagramCard
           caption={text}
           imageUrl={
@@ -244,32 +211,26 @@ export default function PlatformPreview({
           }
           authorName={authorName}
           handleAccent={
-            active === "mastodon"
+            activePlatform === "mastodon"
               ? "text-violet-400"
-              : active === "threads"
+              : activePlatform === "threads"
                 ? "text-zinc-400"
                 : "text-sky-400"
           }
         />
       )}
 
-      <p className="text-xs text-zinc-500">
-        {text.length} / {cap} chars
-      </p>
+      <CharBudgetMeter used={text.length} platform={activePlatform} />
 
       {overCap && (
-        <div className="rounded border border-amber-700 bg-amber-950/30 p-3 text-xs text-amber-200">
-          This {PLATFORM_LABEL[active]} variant is{" "}
-          <span className="font-semibold">{text.length} chars</span>, over the{" "}
-          {cap}-char cap — it will fail the publish gate. The long-term fix is
-          per-platform generation (Phase 12), not truncation.
-          {activeTarget.commentary === null && active !== "linkedin" && (
-            <>
-              {" "}
-              This target currently falls back to the LinkedIn-shaped body.
-            </>
+        <Banner tone="warn">
+          This {PLATFORM_LABEL[activePlatform]} variant is over its {cap}-char
+          cap and will fail the publish gate. The fix is per-platform
+          generation (Phase 12), not truncation.
+          {activeTarget.commentary === null && activePlatform !== "linkedin" && (
+            <> This target currently falls back to the LinkedIn-shaped body.</>
           )}
-        </div>
+        </Banner>
       )}
     </div>
   );

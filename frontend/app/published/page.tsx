@@ -5,18 +5,29 @@ import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
 import { ApiError, apiGet } from "@/lib/api";
+import { CategoryChip } from "@/components/ui/CategoryChip";
+import { Banner } from "@/components/ui/Banner";
+import { PLATFORM_DOT } from "@/components/ui/PlatformBadge";
+import { PLATFORM_LABEL, type Platform, type PostCategory } from "@/lib/domain";
 
-type PostCategory =
-  | "founder_insight"
-  | "engineering_lesson"
-  | "ai_automation"
-  | "startup_opinion"
-  | "technical_humor"
-  | "carousel"
-  | "dev_tooling"
-  | "pricing_business_model"
-  | "product_postmortem"
-  | "design_thinking";
+// Published — confirm what went live, jump to the real post (DESIGN.md §5F).
+// Each row shows every platform target it fanned out to and that target's
+// outcome (partial fan-out shows the failed leg red). A reserved-but-empty
+// "Performance" column signals the deferred Phase-7 analytics slot WITHOUT
+// faking data — `r_member_social` closed in 2026, so there are no real metrics
+// to draw yet (see CONTEXT / memory). The column drops in when Member Data
+// Portability lands.
+
+type TargetStatus = "pending" | "publishing" | "published" | "failed";
+
+type PostTarget = {
+  id: string;
+  platform: Platform;
+  status: TargetStatus;
+  external_urn: string | null;
+  error: string | null;
+  published_at: string | null;
+};
 
 type Post = {
   id: string;
@@ -31,43 +42,14 @@ type Post = {
   error: string | null;
   created_at: string;
   updated_at: string;
-};
-
-const CATEGORY_LABEL: Record<PostCategory, string> = {
-  founder_insight: "Founder insight",
-  engineering_lesson: "Engineering lesson",
-  ai_automation: "AI automation",
-  startup_opinion: "Startup opinion",
-  technical_humor: "Technical humor",
-  carousel: "Carousel",
-  dev_tooling: "Dev tooling",
-  pricing_business_model: "Pricing & business model",
-  product_postmortem: "Product postmortem",
-  design_thinking: "Design thinking",
-};
-
-const CATEGORY_COLORS: Record<PostCategory, string> = {
-  founder_insight: "border-emerald-700 text-emerald-300 bg-emerald-950/30",
-  engineering_lesson: "border-sky-700 text-sky-300 bg-sky-950/30",
-  ai_automation: "border-violet-700 text-violet-300 bg-violet-950/30",
-  startup_opinion: "border-amber-700 text-amber-300 bg-amber-950/30",
-  technical_humor: "border-pink-700 text-pink-300 bg-pink-950/30",
-  carousel: "border-zinc-700 text-zinc-300 bg-zinc-950/30",
-  dev_tooling: "border-teal-700 text-teal-300 bg-teal-950/30",
-  pricing_business_model: "border-lime-700 text-lime-300 bg-lime-950/30",
-  product_postmortem: "border-rose-700 text-rose-300 bg-rose-950/30",
-  design_thinking: "border-fuchsia-700 text-fuchsia-300 bg-fuchsia-950/30",
+  targets: PostTarget[];
 };
 
 /**
- * Build a public link to the LinkedIn post from the URN LinkedIn handed us.
- * Pass the URN through as-is — substituting `share` → `activity` (numeric id
- * unchanged) is only valid for text and image posts. For document posts the
- * activity URN has a DIFFERENT numeric id than the share, so substitution
- * lands you on a different (or non-existent) post. LinkedIn's
- * `/feed/update/{urn}/` redirects share, ugcPost, and activity URNs to the
- * canonical post URL, so handing it our stored share URN works for every
- * post type. Returns null for unrecognized shapes.
+ * Public link to a LinkedIn post from the URN LinkedIn handed us. Pass the URN
+ * through as-is — `/feed/update/{urn}/` redirects share, ugcPost, and activity
+ * URNs to the canonical post for every post type. Returns null for unrecognized
+ * shapes.
  */
 function linkedinUrlFromUrn(urn: string | null): string | null {
   if (!urn) return null;
@@ -75,13 +57,45 @@ function linkedinUrlFromUrn(urn: string | null): string | null {
   return `https://www.linkedin.com/feed/update/${urn}/`;
 }
 
+// Best-effort public URL per platform from the stored external_urn. Only the
+// platforms whose urn is reconstructable get a link; Threads/Instagram store
+// opaque media ids, so they show the outcome without an outbound link.
+function targetUrl(platform: Platform, urn: string | null): string | null {
+  if (!urn) return null;
+  switch (platform) {
+    case "linkedin":
+      return linkedinUrlFromUrn(urn);
+    case "bluesky": {
+      // at://did:plc:xxx/app.bsky.feed.post/rkey → bsky.app permalink
+      const m = urn.match(/^at:\/\/([^/]+)\/[^/]+\/([^/]+)$/);
+      return m ? `https://bsky.app/profile/${m[1]}/post/${m[2]}` : null;
+    }
+    case "mastodon":
+      return urn.startsWith("http") ? urn : null;
+    default:
+      return null;
+  }
+}
+
+function ago(iso: string, now: number): string {
+  const diff = now - new Date(iso).getTime();
+  const hrs = Math.round(diff / 3_600_000);
+  if (hrs < 1) return "just now";
+  if (hrs < 24) return `${hrs}h ago`;
+  const days = Math.round(hrs / 24);
+  if (days < 30) return `${days}d ago`;
+  const months = Math.round(days / 30);
+  return `${months}mo ago`;
+}
+
 function PublishedPage() {
   const router = useRouter();
-  const { session, loading: authLoading, signOut } = useAuth();
+  const { session, loading: authLoading } = useAuth();
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [now] = useState(() => Date.now());
 
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
@@ -105,115 +119,170 @@ function PublishedPage() {
     fetchPosts();
   }, [fetchPosts]);
 
-  // Most-recent first by published_at. Falls back to created_at if the
-  // publisher didn't set published_at for some reason.
+  // Most-recent first by published_at; fall back to created_at.
   const sorted = useMemo(
     () =>
-      [...posts].sort((a, b) => {
-        const at = new Date(a.published_at ?? a.created_at).getTime();
-        const bt = new Date(b.published_at ?? b.created_at).getTime();
-        return bt - at;
-      }),
-    [posts]
+      [...posts].sort(
+        (a, b) =>
+          new Date(b.published_at ?? b.created_at).getTime() -
+          new Date(a.published_at ?? a.created_at).getTime(),
+      ),
+    [posts],
   );
 
   if (authLoading || !session) {
-    return <div className="flex-1 p-8 text-zinc-500">Loading…</div>;
+    return <main className="flex-1 p-8 text-ink-lo">Loading…</main>;
   }
 
   return (
-    <main className="flex-1 px-6 py-10">
-      <header className="flex justify-between items-center mb-8 max-w-5xl mx-auto">
-        <div className="flex items-center gap-6">
-          <Link href="/" className="text-sm text-zinc-400 hover:text-white">
-            ← Dashboard
-          </Link>
-          <h1 className="text-2xl font-bold tracking-tight">Published</h1>
-        </div>
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-zinc-500">{session.user.email}</span>
-          <button onClick={signOut} className="text-zinc-400 hover:text-white">
-            Sign out
-          </button>
-        </div>
-      </header>
-
-      <div className="max-w-5xl mx-auto space-y-4">
-        <p className="text-sm text-zinc-500">
+    <main className="mx-auto w-full max-w-5xl px-6 py-10">
+      <header className="mb-6">
+        <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+          Published
+        </h1>
+        <p className="mt-2 text-sm text-ink-mid">
           {loading
             ? "Loading…"
-            : `${sorted.length} published post${sorted.length === 1 ? "" : "s"}, most recent first.`}
+            : `What went live — ${sorted.length} post${sorted.length === 1 ? "" : "s"}, most recent first.`}
         </p>
+      </header>
 
-        {error && (
-          <div className="rounded border border-red-700 bg-red-950/30 p-3 text-sm font-mono break-all">
-            {error}
-          </div>
-        )}
+      {error && (
+        <Banner tone="error" className="mb-6">
+          {error}
+        </Banner>
+      )}
 
-        <ul className="space-y-3">
-          {sorted.map((p) => {
-            const liUrl = linkedinUrlFromUrn(p.linkedin_urn);
-            return (
-              <li key={p.id}>
-                <div className="rounded border border-zinc-800 bg-zinc-950/50 p-4 hover:border-zinc-600 transition">
-                  <div className="flex items-center gap-2 mb-2 text-xs">
-                    <span
-                      className={`inline-block rounded border px-2 py-0.5 ${CATEGORY_COLORS[p.category]}`}
-                    >
-                      {CATEGORY_LABEL[p.category]}
-                    </span>
-                    <span className="inline-block rounded border border-green-700 text-green-300 bg-green-950/30 px-2 py-0.5">
-                      published
-                    </span>
-                    {p.published_at && (
-                      <span className="text-zinc-400">
-                        {new Date(p.published_at).toLocaleString()}
-                      </span>
-                    )}
-                  </div>
-                  <Link
-                    href={`/drafts/${p.id}`}
-                    className="block text-sm font-medium leading-snug line-clamp-2 hover:underline"
-                  >
-                    {p.hook}
-                  </Link>
-                  <div className="flex items-center gap-3 mt-3 text-xs">
-                    {liUrl ? (
-                      <a
-                        href={liUrl}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="text-blue-400 hover:underline"
-                      >
-                        View on LinkedIn →
-                      </a>
-                    ) : (
-                      <span className="text-zinc-500">No LinkedIn link</span>
-                    )}
-                    {p.linkedin_urn && (
-                      <span className="text-zinc-600 font-mono">
-                        {p.linkedin_urn}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </li>
-            );
-          })}
-          {!loading && sorted.length === 0 && (
-            <li className="text-sm text-zinc-500 py-12 text-center">
-              Nothing published yet. Drafts ship from{" "}
-              <Link href="/scheduled" className="underline">
-                /scheduled
-              </Link>{" "}
-              once the Phase 6 worker is wired.
-            </li>
-          )}
-        </ul>
+      {/* Column headers — the empty Performance slot is intentional (§5F). */}
+      <div className="mb-2 hidden grid-cols-[1fr_150px] gap-4 border-b border-border px-4 pb-2 text-xs font-medium uppercase tracking-wide text-ink-lo sm:grid">
+        <span>Post</span>
+        <span className="border-l border-border pl-4">Performance</span>
       </div>
+
+      <ul className="space-y-3">
+        {sorted.map((p) => (
+          <li
+            key={p.id}
+            className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-surface-1 p-4 sm:grid-cols-[1fr_150px]"
+          >
+            <div className="min-w-0">
+              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-lo">
+                <CategoryChip category={p.category} />
+                {p.published_at && (
+                  <span>
+                    {new Date(p.published_at).toLocaleDateString([], {
+                      month: "short",
+                      day: "numeric",
+                      year: "numeric",
+                    })}{" "}
+                    · {ago(p.published_at, now)}
+                  </span>
+                )}
+              </div>
+
+              <Link
+                href={`/drafts/${p.id}`}
+                className="block font-serif text-[15px] leading-snug text-ink-hi line-clamp-2 hover:underline"
+              >
+                {p.hook}
+              </Link>
+
+              {/* Fan-out outcomes. */}
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {p.targets.length === 0 ? (
+                  <LegacyLinkedInChip urn={p.linkedin_urn} />
+                ) : (
+                  p.targets.map((t) => <TargetChip key={t.id} target={t} />)
+                )}
+              </div>
+            </div>
+
+            {/* Reserved Performance cell — no fake charts (§5F). */}
+            <div className="hidden items-center border-l border-border pl-4 text-xs text-ink-lo sm:flex">
+              <span title="Analytics deferred until Member Data Portability lands">
+                —
+              </span>
+            </div>
+          </li>
+        ))}
+        {!loading && sorted.length === 0 && (
+          <li className="rounded-lg border border-dashed border-border py-12 text-center text-sm text-ink-lo">
+            Nothing published yet. Approved drafts ship from the{" "}
+            <Link href="/scheduled" className="underline">
+              Calendar
+            </Link>
+            .
+          </li>
+        )}
+      </ul>
     </main>
   );
+}
+
+function TargetChip({ target }: { target: PostTarget }) {
+  const url = targetUrl(target.platform, target.external_urn);
+  const failed = target.status === "failed";
+  const label = PLATFORM_LABEL[target.platform];
+
+  const inner = (
+    <>
+      <span className={"h-1.5 w-1.5 rounded-full " + PLATFORM_DOT[target.platform]} />
+      {label}
+      {failed ? (
+        <span className="text-status-failed">· failed</span>
+      ) : url ? (
+        <span aria-hidden>↗</span>
+      ) : (
+        <span className="text-status-published">✓</span>
+      )}
+    </>
+  );
+
+  const base =
+    "inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-xs " +
+    (failed
+      ? "border-status-failed/40 text-status-failed"
+      : "border-border text-ink-mid");
+
+  if (url && !failed) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`View on ${label}`}
+        className={base + " hover:border-ink-lo hover:text-ink-hi"}
+      >
+        {inner}
+      </a>
+    );
+  }
+  return (
+    <span title={failed ? (target.error ?? "Publish failed") : label} className={base}>
+      {inner}
+    </span>
+  );
+}
+
+// Pre-fan-out posts (only `linkedin_urn`, no PostTarget rows).
+function LegacyLinkedInChip({ urn }: { urn: string | null }) {
+  const url = linkedinUrlFromUrn(urn);
+  const base =
+    "inline-flex items-center gap-1.5 rounded-full border border-border px-2 py-0.5 text-xs text-ink-mid";
+  if (url) {
+    return (
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        className={base + " hover:border-ink-lo hover:text-ink-hi"}
+      >
+        <span className={"h-1.5 w-1.5 rounded-full " + PLATFORM_DOT.linkedin} />
+        LinkedIn <span aria-hidden>↗</span>
+      </a>
+    );
+  }
+  return <span className={base}>No external link</span>;
 }
 
 export default PublishedPage;

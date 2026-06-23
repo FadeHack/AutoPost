@@ -1,131 +1,88 @@
 "use client";
 
-import { Suspense, useEffect, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
-import { ApiError, apiDelete, apiGet, apiPost } from "@/lib/api";
+import { Banner } from "@/components/ui/Banner";
+import { ApiError, apiGet } from "@/lib/api";
+import { tokenExpiry } from "@/lib/tokenExpiry";
+import type { PostCategory, PostStatus } from "@/lib/domain";
 
-type LinkedInStatus = {
-  connected: boolean;
-  account_kind: string | null;
-  display_name: string | null;
-  expires_at: string | null;
-};
+// Today (DESIGN.md §5A) — the command center the daily loop opens on. Answers
+// "what needs me, and is the machine healthy?" then acts in one click. Three
+// bands: token-health (only when amber/red) · three worklist counters · the
+// pipeline funnel + fresh-trends peek + the primary Generate CTA. Connections
+// moved to Settings, so this opens on the work, not on plumbing.
 
-type BlueskyStatus = {
-  connected: boolean;
-  handle: string | null;
-  did: string | null;
-  display_name: string | null;
-};
+type LinkedInStatus = { expires_at: string | null };
 
-type MastodonStatus = {
-  connected: boolean;
-  instance_url: string | null;
-  handle: string | null;
-  display_name: string | null;
-};
-
-type ThreadsStatus = {
-  enabled: boolean;
-  connected: boolean;
-  username: string | null;
-  display_name: string | null;
-  expires_at: string | null;
-};
-
-type InstagramStatus = {
-  enabled: boolean;
-  connected: boolean;
-  username: string | null;
-  account_type: string | null;
-  expires_at: string | null;
-};
-
-type TokenExpiry = {
-  level: "ok" | "amber" | "red";
+type Trend = {
+  id: string;
+  source: "rss" | "hackernews" | "reddit";
   title: string;
-  subtitle: string;
+  url: string;
+  created_at: string;
 };
 
-function tokenExpiry(expiresAt: string | null): TokenExpiry | null {
-  if (!expiresAt) return null;
-  const expMs = new Date(expiresAt).getTime();
-  if (Number.isNaN(expMs)) return null;
-  const days = (expMs - Date.now()) / 86_400_000;
-  const human = new Date(expMs).toLocaleString();
-  if (days < 0) {
-    const ago = Math.ceil(-days);
-    return {
-      level: "red",
-      title: "LinkedIn token expired. Publishing is paused.",
-      subtitle: `Expired ${ago} day${ago === 1 ? "" : "s"} ago (${human}). Reconnect to resume.`,
-    };
-  }
-  if (days <= 3) {
-    const n = Math.ceil(days);
-    return {
-      level: "red",
-      title: `LinkedIn token expires in ${n} day${n === 1 ? "" : "s"}.`,
-      subtitle: `Standard dev apps don't issue refresh tokens — reconnect manually before ${human}.`,
-    };
-  }
-  if (days <= 10) {
-    const n = Math.ceil(days);
-    return {
-      level: "amber",
-      title: `LinkedIn token expires in ${n} days.`,
-      subtitle: `Reconnect any time before ${human} to avoid a publishing gap.`,
-    };
-  }
-  return { level: "ok", title: "", subtitle: "" };
+type Post = {
+  id: string;
+  status: PostStatus;
+  category: PostCategory;
+  hook: string;
+  scheduled_at: string | null;
+  published_at: string | null;
+  created_at: string;
+};
+
+const TREND_LIMIT = 50;
+const POST_LIMIT = 100;
+
+function cap(n: number, limit: number): string {
+  return n >= limit ? `${limit}+` : `${n}`;
 }
 
-function Dashboard() {
+function relativeFromNow(iso: string, now: number): string {
+  const diff = new Date(iso).getTime() - now;
+  const past = diff <= 0;
+  const mins = Math.round(Math.abs(diff) / 60_000);
+  let s: string;
+  if (mins < 60) s = `${mins} min`;
+  else if (mins < 1440) s = `${Math.round(mins / 60)} hr`;
+  else s = `${Math.round(mins / 1440)} day${Math.round(mins / 1440) === 1 ? "" : "s"}`;
+  return past ? `${s} ago` : `in ${s}`;
+}
+
+const SOURCE_LABEL: Record<Trend["source"], string> = {
+  rss: "RSS",
+  hackernews: "HN",
+  reddit: "Reddit",
+};
+
+function Today() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { session, loading: authLoading, signOut } = useAuth();
-  const [status, setStatus] = useState<LinkedInStatus | null>(null);
-  const [statusLoading, setStatusLoading] = useState(true);
-  const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState("");
-  // Bluesky uses App Password (no OAuth) — inline form vs LinkedIn redirect.
-  const [bskyStatus, setBskyStatus] = useState<BlueskyStatus | null>(null);
-  const [bskyLoading, setBskyLoading] = useState(true);
-  const [bskyFormOpen, setBskyFormOpen] = useState(false);
-  const [bskyHandle, setBskyHandle] = useState("");
-  const [bskyPassword, setBskyPassword] = useState("");
-  const [bskyConnecting, setBskyConnecting] = useState(false);
-  const [bskyError, setBskyError] = useState("");
-  // Mastodon is federated — full OAuth, but the user must name their instance
-  // first (we register an app on it server-side, then redirect to authorize).
-  const [mastoStatus, setMastoStatus] = useState<MastodonStatus | null>(null);
-  const [mastoLoading, setMastoLoading] = useState(true);
-  const [mastoFormOpen, setMastoFormOpen] = useState(false);
-  const [mastoInstance, setMastoInstance] = useState("");
-  const [mastoConnecting, setMastoConnecting] = useState(false);
-  const [mastoError, setMastoError] = useState("");
-  // Threads is Meta-gated — the backend reports `enabled` (PLATFORM_THREADS_ENABLED).
-  // When disabled the whole section is hidden. Connect is a LinkedIn-style redirect.
-  const [threadsStatus, setThreadsStatus] = useState<ThreadsStatus | null>(null);
-  const [threadsLoading, setThreadsLoading] = useState(true);
-  const [threadsConnecting, setThreadsConnecting] = useState(false);
-  const [threadsError, setThreadsError] = useState("");
-  // Instagram is Meta-gated — same shape as Threads (Instagram Login redirect).
-  const [instagramStatus, setInstagramStatus] = useState<InstagramStatus | null>(null);
-  const [instagramLoading, setInstagramLoading] = useState(true);
-  const [instagramConnecting, setInstagramConnecting] = useState(false);
-  const [instagramError, setInstagramError] = useState("");
+  const { session, loading: authLoading } = useAuth();
 
-  const linkedInResult = searchParams.get("linkedin");
-  const linkedInMessage = searchParams.get("message");
-  const mastodonResult = searchParams.get("mastodon");
-  const mastodonMessage = searchParams.get("message");
-  const threadsResult = searchParams.get("threads");
-  const threadsMessage = searchParams.get("message");
-  const instagramResult = searchParams.get("instagram");
-  const instagramMessage = searchParams.get("message");
+  const [expiresAt, setExpiresAt] = useState<string | null>(null);
+  const [trends, setTrends] = useState<Trend[]>([]);
+  const [draft, setDraft] = useState<Post[]>([]);
+  const [approved, setApproved] = useState<Post[]>([]);
+  const [scheduled, setScheduled] = useState<Post[]>([]);
+  const [published, setPublished] = useState<Post[]>([]);
+  const [failed, setFailed] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  // Snapshot the clock once (lazy init runs a single time, keeping render pure).
+  const [now] = useState(() => Date.now());
+
+  // OAuth callbacks redirect here with ?<platform>=connected|error.
+  const platformResult = (["linkedin", "mastodon", "threads", "instagram"] as const)
+    .map((p) => ({ platform: p, value: searchParams.get(p) }))
+    .find((r) => r.value);
+  const callbackMessage = searchParams.get("message");
+  const [callbackDismissed, setCallbackDismissed] = useState(false);
 
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
@@ -133,679 +90,288 @@ function Dashboard() {
 
   useEffect(() => {
     if (!session) return;
-    setStatusLoading(true);
-    apiGet<LinkedInStatus>("/auth/linkedin/status")
-      .then(setStatus)
-      .catch((e) => setError(e instanceof ApiError ? e.body : (e as Error).message))
-      .finally(() => setStatusLoading(false));
-  }, [session, linkedInResult]);
-
-  useEffect(() => {
-    if (!session) return;
-    setBskyLoading(true);
-    apiGet<BlueskyStatus>("/auth/bluesky/status")
-      .then(setBskyStatus)
-      .catch(() => setBskyStatus({ connected: false, handle: null, did: null, display_name: null }))
-      .finally(() => setBskyLoading(false));
+    setLoading(true);
+    setError("");
+    Promise.all([
+      apiGet<LinkedInStatus>("/auth/linkedin/status").catch(() => ({
+        expires_at: null,
+      })),
+      apiGet<Trend[]>(`/trends?status=unconsumed&limit=${TREND_LIMIT}`).catch(
+        () => [],
+      ),
+      apiGet<Post[]>(`/posts?status=draft&limit=${POST_LIMIT}`).catch(() => []),
+      apiGet<Post[]>(`/posts?status=approved&limit=${POST_LIMIT}`).catch(() => []),
+      apiGet<Post[]>(`/posts?status=scheduled&limit=${POST_LIMIT}`).catch(() => []),
+      apiGet<Post[]>(`/posts?status=published&limit=${POST_LIMIT}`).catch(() => []),
+      apiGet<Post[]>(`/posts?status=failed&limit=${POST_LIMIT}`).catch(() => []),
+    ])
+      .then(([li, tr, d, a, s, p, f]) => {
+        setExpiresAt(li.expires_at);
+        setTrends(tr);
+        setDraft(d);
+        setApproved(a);
+        setScheduled(s);
+        setPublished(p);
+        setFailed(f);
+      })
+      .catch((e) =>
+        setError(e instanceof ApiError ? e.body : (e as Error).message),
+      )
+      .finally(() => setLoading(false));
   }, [session]);
 
-  useEffect(() => {
-    if (!session) return;
-    setMastoLoading(true);
-    apiGet<MastodonStatus>("/auth/mastodon/status")
-      .then(setMastoStatus)
-      .catch(() =>
-        setMastoStatus({
-          connected: false,
-          instance_url: null,
-          handle: null,
-          display_name: null,
-        })
-      )
-      .finally(() => setMastoLoading(false));
-  }, [session, mastodonResult]);
-
-  useEffect(() => {
-    if (!session) return;
-    setThreadsLoading(true);
-    apiGet<ThreadsStatus>("/auth/threads/status")
-      .then(setThreadsStatus)
-      .catch(() =>
-        setThreadsStatus({
-          enabled: false,
-          connected: false,
-          username: null,
-          display_name: null,
-          expires_at: null,
-        })
-      )
-      .finally(() => setThreadsLoading(false));
-  }, [session, threadsResult]);
-
-  useEffect(() => {
-    if (!session) return;
-    setInstagramLoading(true);
-    apiGet<InstagramStatus>("/auth/instagram/status")
-      .then(setInstagramStatus)
-      .catch(() =>
-        setInstagramStatus({
-          enabled: false,
-          connected: false,
-          username: null,
-          account_type: null,
-          expires_at: null,
-        })
-      )
-      .finally(() => setInstagramLoading(false));
-  }, [session, instagramResult]);
-
-  const connectInstagram = async () => {
-    setInstagramConnecting(true);
-    setInstagramError("");
-    try {
-      const { authorize_url } = await apiGet<{ authorize_url: string }>(
-        "/auth/instagram/start"
-      );
-      window.location.href = authorize_url;
-    } catch (e) {
-      setInstagramError(e instanceof ApiError ? e.body : (e as Error).message);
-      setInstagramConnecting(false);
-    }
-  };
-
-  const disconnectInstagram = async () => {
-    if (
-      !confirm(
-        "Disconnect Instagram? Any scheduled Instagram publishes will fail."
-      )
-    )
-      return;
-    try {
-      await apiDelete("/auth/instagram/disconnect");
-      setInstagramStatus({
-        enabled: true,
-        connected: false,
-        username: null,
-        account_type: null,
-        expires_at: null,
-      });
-    } catch (e) {
-      setInstagramError(e instanceof ApiError ? e.body : (e as Error).message);
-    }
-  };
-
-  const connectThreads = async () => {
-    setThreadsConnecting(true);
-    setThreadsError("");
-    try {
-      const { authorize_url } = await apiGet<{ authorize_url: string }>(
-        "/auth/threads/start"
-      );
-      window.location.href = authorize_url;
-    } catch (e) {
-      setThreadsError(e instanceof ApiError ? e.body : (e as Error).message);
-      setThreadsConnecting(false);
-    }
-  };
-
-  const disconnectThreads = async () => {
-    if (!confirm("Disconnect Threads? Any scheduled Threads publishes will fail."))
-      return;
-    try {
-      await apiDelete("/auth/threads/disconnect");
-      setThreadsStatus({
-        enabled: true,
-        connected: false,
-        username: null,
-        display_name: null,
-        expires_at: null,
-      });
-    } catch (e) {
-      setThreadsError(e instanceof ApiError ? e.body : (e as Error).message);
-    }
-  };
-
-  const connectMastodon = async () => {
-    setMastoConnecting(true);
-    setMastoError("");
-    try {
-      const { authorize_url } = await apiGet<{ authorize_url: string }>(
-        `/auth/mastodon/start?instance=${encodeURIComponent(mastoInstance.trim())}`
-      );
-      window.location.href = authorize_url;
-    } catch (e) {
-      setMastoError(e instanceof ApiError ? e.body : (e as Error).message);
-      setMastoConnecting(false);
-    }
-  };
-
-  const disconnectMastodon = async () => {
-    if (!confirm("Disconnect Mastodon? Any scheduled Mastodon publishes will fail."))
-      return;
-    try {
-      await apiDelete("/auth/mastodon/disconnect");
-      setMastoStatus({
-        connected: false,
-        instance_url: null,
-        handle: null,
-        display_name: null,
-      });
-    } catch (e) {
-      setMastoError(e instanceof ApiError ? e.body : (e as Error).message);
-    }
-  };
-
-  const connectBluesky = async () => {
-    setBskyConnecting(true);
-    setBskyError("");
-    try {
-      const res = await apiPost<BlueskyStatus>("/auth/bluesky/connect", {
-        handle: bskyHandle.trim(),
-        app_password: bskyPassword,
-      });
-      setBskyStatus(res);
-      setBskyFormOpen(false);
-      setBskyHandle("");
-      setBskyPassword("");
-    } catch (e) {
-      setBskyError(e instanceof ApiError ? e.body : (e as Error).message);
-    } finally {
-      setBskyConnecting(false);
-    }
-  };
-
-  const disconnectBluesky = async () => {
-    if (!confirm("Disconnect Bluesky? Any scheduled Bluesky publishes will fail.")) return;
-    try {
-      await apiDelete("/auth/bluesky/disconnect");
-      setBskyStatus({ connected: false, handle: null, did: null, display_name: null });
-    } catch (e) {
-      setBskyError(e instanceof ApiError ? e.body : (e as Error).message);
-    }
-  };
-
-  const connect = async () => {
+  const reconnect = useCallback(async () => {
     setConnecting(true);
-    setError("");
     try {
       const { authorize_url } = await apiGet<{ authorize_url: string }>(
-        "/auth/linkedin/start"
+        "/auth/linkedin/start",
       );
       window.location.href = authorize_url;
-    } catch (e) {
-      setError(e instanceof ApiError ? e.body : (e as Error).message);
+    } catch {
       setConnecting(false);
     }
-  };
+  }, []);
 
   if (authLoading || !session) {
-    return <div className="flex-1 p-8 text-zinc-500">Loading…</div>;
+    return <main className="flex-1 p-8 text-ink-lo">Loading…</main>;
   }
 
-  const expiry = tokenExpiry(status?.expires_at ?? null);
+  const expiry = tokenExpiry(expiresAt);
+
+  // Next scheduled post, soonest first.
+  const nextScheduled = [...scheduled]
+    .filter((p) => p.scheduled_at)
+    .sort(
+      (a, b) =>
+        new Date(a.scheduled_at!).getTime() - new Date(b.scheduled_at!).getTime(),
+    )[0];
+
+  const weekAgo = now - 7 * 86_400_000;
+  const published7d = published.filter(
+    (p) => p.published_at && new Date(p.published_at).getTime() >= weekAgo,
+  ).length;
+
+  const needsReview = draft.length + failed.length;
+
+  const funnel = [
+    { label: "Inbox", count: cap(trends.length, TREND_LIMIT), href: "/trends" },
+    { label: "Draft", count: cap(draft.length, POST_LIMIT), href: "/drafts" },
+    { label: "Approved", count: cap(approved.length, POST_LIMIT), href: "/drafts" },
+    { label: "Scheduled", count: cap(scheduled.length, POST_LIMIT), href: "/scheduled" },
+    { label: "Live", count: cap(published.length, POST_LIMIT), href: "/published" },
+  ];
+
+  const dateLabel = new Date(now).toLocaleDateString(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+  });
 
   return (
-    <main className="flex-1 px-6 py-10">
-      <header className="flex justify-between items-center mb-12 max-w-4xl mx-auto">
-        <h1 className="text-2xl font-bold tracking-tight">AutoPost</h1>
-        <div className="flex items-center gap-4 text-sm">
-          <span className="text-zinc-500">{session.user.email}</span>
-          <button onClick={signOut} className="text-zinc-400 hover:text-white">
-            Sign out
-          </button>
+    <main className="mx-auto w-full max-w-5xl px-6 py-10">
+      <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
+        <div>
+          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">Today</h1>
+          <p className="mt-1 text-sm text-ink-mid">{dateLabel}</p>
         </div>
+        <Link
+          href="/drafts"
+          className="rounded-md bg-accent px-5 py-2.5 text-sm font-medium text-accent-ink hover:bg-accent/90"
+        >
+          Generate a draft →
+        </Link>
       </header>
 
-      <div className="max-w-4xl mx-auto space-y-6">
-        {linkedInResult === "connected" && (
-          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
-            LinkedIn connected.
-          </div>
-        )}
-        {linkedInResult === "error" && (
-          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
-            LinkedIn error:{" "}
-            <span className="font-mono text-xs">{linkedInMessage}</span>
-          </div>
-        )}
-        {mastodonResult === "connected" && (
-          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
-            Mastodon connected.
-          </div>
-        )}
-        {mastodonResult === "error" && (
-          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
-            Mastodon error:{" "}
-            <span className="font-mono text-xs">{mastodonMessage}</span>
-          </div>
-        )}
-        {threadsResult === "connected" && (
-          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
-            Threads connected.
-          </div>
-        )}
-        {threadsResult === "error" && (
-          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
-            Threads error:{" "}
-            <span className="font-mono text-xs">{threadsMessage}</span>
-          </div>
-        )}
-        {instagramResult === "connected" && (
-          <div className="rounded border border-green-700 bg-green-950/30 p-4 text-sm">
-            Instagram connected.
-          </div>
-        )}
-        {instagramResult === "error" && (
-          <div className="rounded border border-red-700 bg-red-950/30 p-4 text-sm">
-            Instagram error:{" "}
-            <span className="font-mono text-xs">{instagramMessage}</span>
-          </div>
-        )}
-        {expiry && expiry.level !== "ok" && (
-          <div
-            className={
-              "rounded border p-4 text-sm flex items-center justify-between gap-4 " +
-              (expiry.level === "red"
-                ? "border-red-700 bg-red-950/40"
-                : "border-amber-700 bg-amber-950/30")
-            }
-          >
-            <div>
-              <p className="font-medium">{expiry.title}</p>
-              <p
-                className={
-                  "text-xs mt-1 " +
-                  (expiry.level === "red" ? "text-red-300" : "text-amber-300")
-                }
-              >
-                {expiry.subtitle}
-              </p>
-            </div>
+      {/* Band 1 — token health (only when it needs attention) */}
+      {platformResult && !callbackDismissed && (
+        <Banner
+          tone={platformResult.value === "connected" ? "success" : "error"}
+          className="mb-4"
+          onDismiss={() => setCallbackDismissed(true)}
+          title={
+            platformResult.value === "connected"
+              ? `${platformResult.platform[0].toUpperCase()}${platformResult.platform.slice(1)} connected.`
+              : `${platformResult.platform[0].toUpperCase()}${platformResult.platform.slice(1)} connection failed.`
+          }
+        >
+          {platformResult.value === "error" && callbackMessage && (
+            <span className="font-mono break-all">{callbackMessage}</span>
+          )}
+        </Banner>
+      )}
+
+      {expiry && expiry.level !== "ok" && (
+        <Banner
+          tone={expiry.level === "red" ? "error" : "warn"}
+          className="mb-4"
+          title={expiry.title}
+        >
+          <div className="flex items-center justify-between gap-4">
+            <span>{expiry.subtitle}</span>
             <button
-              onClick={connect}
+              onClick={reconnect}
               disabled={connecting}
-              className={
-                "shrink-0 rounded font-medium px-4 py-2 text-sm disabled:opacity-50 " +
-                (expiry.level === "red"
-                  ? "bg-red-600 hover:bg-red-500 text-white"
-                  : "bg-amber-500 hover:bg-amber-400 text-black")
-              }
+              className="shrink-0 rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:bg-accent/90 disabled:opacity-50"
             >
-              {connecting ? "Redirecting…" : "Reconnect LinkedIn"}
+              {connecting ? "Redirecting…" : "Reconnect"}
             </button>
           </div>
-        )}
+        </Banner>
+      )}
 
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-4">LinkedIn</h2>
-          {statusLoading ? (
-            <p className="text-sm text-zinc-500">Loading status…</p>
-          ) : status?.connected ? (
-            <div className="space-y-3">
-              <p className="text-sm">
-                Connected as{" "}
-                <span className="font-medium">{status.display_name ?? "(no name)"}</span>
-              </p>
-              <div className="text-xs text-zinc-500 space-y-1">
-                <p>Account kind: {status.account_kind}</p>
-                <p>
-                  Token expires:{" "}
-                  {status.expires_at
-                    ? new Date(status.expires_at).toLocaleString()
-                    : "—"}
-                </p>
-              </div>
-              <button
-                onClick={connect}
-                disabled={connecting}
-                className="text-xs text-zinc-400 hover:text-white underline disabled:opacity-50"
+      {error && (
+        <Banner tone="error" className="mb-4">
+          <span className="font-mono break-all">{error}</span>
+        </Banner>
+      )}
+
+      {/* Band 2 — worklist counters */}
+      <section className="mb-8 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        <Counter
+          href="/drafts"
+          label="Needs review"
+          value={loading ? "—" : cap(needsReview, POST_LIMIT * 2)}
+          sub={
+            failed.length > 0
+              ? `${draft.length} draft${draft.length === 1 ? "" : "s"} · ${failed.length} failed`
+              : "drafts awaiting review"
+          }
+          alert={failed.length > 0}
+        />
+        <Counter
+          href="/scheduled"
+          label="Scheduled"
+          value={loading ? "—" : cap(scheduled.length, POST_LIMIT)}
+          sub={
+            nextScheduled?.scheduled_at
+              ? `next ${relativeFromNow(nextScheduled.scheduled_at, now)}`
+              : "nothing queued"
+          }
+        />
+        <Counter
+          href="/published"
+          label="Published"
+          value={loading ? "—" : `${published7d}`}
+          sub="last 7 days"
+        />
+      </section>
+
+      {/* Band 3 — pipeline funnel */}
+      <section className="mb-8">
+        <h2 className="mb-3 text-xs uppercase tracking-wider text-ink-lo">
+          Pipeline
+        </h2>
+        <div className="flex flex-wrap items-stretch gap-1.5">
+          {funnel.map((stage, i) => (
+            <div key={stage.label} className="flex items-stretch gap-1.5">
+              <Link
+                href={stage.href}
+                className="group flex min-w-[88px] flex-1 flex-col rounded-md border border-border bg-surface-1 px-4 py-3 transition-colors hover:border-ink-lo"
               >
-                {connecting ? "Redirecting…" : "Reconnect"}
-              </button>
-            </div>
-          ) : (
-            <button
-              onClick={connect}
-              disabled={connecting}
-              className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200 disabled:opacity-50"
-            >
-              {connecting ? "Redirecting…" : "Connect LinkedIn"}
-            </button>
-          )}
-          {error && (
-            <p className="text-red-400 text-xs mt-4 font-mono break-all">{error}</p>
-          )}
-        </section>
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-4">Bluesky</h2>
-          {bskyLoading ? (
-            <p className="text-sm text-zinc-500">Loading status…</p>
-          ) : bskyStatus?.connected ? (
-            <div className="space-y-3">
-              <p className="text-sm">
-                Connected as{" "}
-                <span className="font-medium">
-                  @{bskyStatus.handle}
+                <span className="font-serif text-2xl text-ink-hi">
+                  {loading ? "—" : stage.count}
                 </span>
-                {bskyStatus.display_name && (
-                  <span className="text-zinc-500"> ({bskyStatus.display_name})</span>
-                )}
-              </p>
-              <p className="text-xs text-zinc-500 font-mono break-all">
-                DID: {bskyStatus.did}
-              </p>
-              <button
-                onClick={disconnectBluesky}
-                className="text-xs text-zinc-400 hover:text-white underline"
-              >
-                Disconnect
-              </button>
+                <span className="mt-0.5 text-xs text-ink-mid group-hover:text-ink-hi">
+                  {stage.label}
+                </span>
+              </Link>
+              {i < funnel.length - 1 && (
+                <span className="flex items-center text-ink-lo" aria-hidden>
+                  →
+                </span>
+              )}
             </div>
-          ) : bskyFormOpen ? (
-            <div className="space-y-3">
-              <p className="text-xs text-zinc-500">
-                Bluesky uses an app password, not OAuth. Generate one at{" "}
+          ))}
+        </div>
+      </section>
+
+      {/* Band 3 — fresh-trends peek */}
+      <section>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-xs uppercase tracking-wider text-ink-lo">
+            Fresh in the inbox
+          </h2>
+          <Link href="/trends" className="text-xs text-ink-mid hover:text-ink-hi">
+            Browse inbox →
+          </Link>
+        </div>
+        {loading ? (
+          <p className="text-sm text-ink-lo">Loading…</p>
+        ) : trends.length === 0 ? (
+          <p className="text-sm text-ink-lo">
+            Nothing unconsumed. The 6-hour cron pulls more, or refresh from the
+            inbox.
+          </p>
+        ) : (
+          <ul className="divide-y divide-border rounded-md border border-border">
+            {trends.slice(0, 5).map((t) => (
+              <li key={t.id}>
                 <a
-                  href="https://bsky.app/settings/app-passwords"
+                  href={t.url}
                   target="_blank"
-                  rel="noreferrer"
-                  className="underline hover:text-white"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 px-4 py-3 hover:bg-surface-1"
                 >
-                  bsky.app/settings/app-passwords
-                </a>.
-              </p>
-              <input
-                type="text"
-                placeholder="handle (e.g. nestwhirr.bsky.social)"
-                value={bskyHandle}
-                onChange={(e) => setBskyHandle(e.target.value)}
-                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm"
-              />
-              <input
-                type="password"
-                placeholder="app password (xxxx-xxxx-xxxx-xxxx)"
-                value={bskyPassword}
-                onChange={(e) => setBskyPassword(e.target.value)}
-                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm font-mono"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={connectBluesky}
-                  disabled={bskyConnecting || !bskyHandle.trim() || !bskyPassword}
-                  className="rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {bskyConnecting ? "Connecting…" : "Save"}
-                </button>
-                <button
-                  onClick={() => {
-                    setBskyFormOpen(false);
-                    setBskyError("");
-                  }}
-                  className="rounded border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setBskyFormOpen(true)}
-              className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200"
-            >
-              Connect Bluesky
-            </button>
-          )}
-          {bskyError && (
-            <p className="text-red-400 text-xs mt-4 font-mono break-all">
-              {bskyError}
-            </p>
-          )}
-        </section>
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-4">Mastodon</h2>
-          {mastoLoading ? (
-            <p className="text-sm text-zinc-500">Loading status…</p>
-          ) : mastoStatus?.connected ? (
-            <div className="space-y-3">
-              <p className="text-sm">
-                Connected as{" "}
-                <span className="font-medium">
-                  @{mastoStatus.handle}
-                </span>
-                {mastoStatus.display_name && (
-                  <span className="text-zinc-500"> ({mastoStatus.display_name})</span>
-                )}
-              </p>
-              <p className="text-xs text-zinc-500 font-mono break-all">
-                {mastoStatus.instance_url}
-              </p>
-              <button
-                onClick={disconnectMastodon}
-                className="text-xs text-zinc-400 hover:text-white underline"
-              >
-                Disconnect
-              </button>
-            </div>
-          ) : mastoFormOpen ? (
-            <div className="space-y-3">
-              <p className="text-xs text-zinc-500">
-                Mastodon is federated — enter your home instance. We register an
-                app on it, then redirect you to authorize.
-              </p>
-              <input
-                type="text"
-                placeholder="instance (e.g. mastodon.social)"
-                value={mastoInstance}
-                onChange={(e) => setMastoInstance(e.target.value)}
-                className="w-full rounded bg-zinc-900 border border-zinc-800 px-3 py-2 text-sm"
-              />
-              <div className="flex gap-2">
-                <button
-                  onClick={connectMastodon}
-                  disabled={mastoConnecting || !mastoInstance.trim()}
-                  className="rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {mastoConnecting ? "Redirecting…" : "Authorize"}
-                </button>
-                <button
-                  onClick={() => {
-                    setMastoFormOpen(false);
-                    setMastoError("");
-                  }}
-                  className="rounded border border-zinc-700 px-4 py-2 text-sm hover:bg-zinc-800"
-                >
-                  Cancel
-                </button>
-              </div>
-            </div>
-          ) : (
-            <button
-              onClick={() => setMastoFormOpen(true)}
-              className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200"
-            >
-              Connect Mastodon
-            </button>
-          )}
-          {mastoError && (
-            <p className="text-red-400 text-xs mt-4 font-mono break-all">
-              {mastoError}
-            </p>
-          )}
-        </section>
-
-        {!threadsLoading && threadsStatus?.enabled && (
-          <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-            <h2 className="text-lg font-semibold mb-4">Threads</h2>
-            {threadsStatus.connected ? (
-              <div className="space-y-3">
-                <p className="text-sm">
-                  Connected as{" "}
-                  <span className="font-medium">@{threadsStatus.username}</span>
-                  {threadsStatus.display_name && (
-                    <span className="text-zinc-500">
-                      {" "}
-                      ({threadsStatus.display_name})
-                    </span>
-                  )}
-                </p>
-                {threadsStatus.expires_at && (
-                  <p className="text-xs text-zinc-500">
-                    Token expires:{" "}
-                    {new Date(threadsStatus.expires_at).toLocaleString()}
-                  </p>
-                )}
-                <button
-                  onClick={disconnectThreads}
-                  className="text-xs text-zinc-400 hover:text-white underline"
-                >
-                  Disconnect
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <p className="text-xs text-zinc-500">
-                  Threads uses Meta&apos;s OAuth. You&apos;ll be redirected to
-                  authorize, then back here.
-                </p>
-                <button
-                  onClick={connectThreads}
-                  disabled={threadsConnecting}
-                  className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {threadsConnecting ? "Redirecting…" : "Connect Threads"}
-                </button>
-              </div>
-            )}
-            {threadsError && (
-              <p className="text-red-400 text-xs mt-4 font-mono break-all">
-                {threadsError}
-              </p>
-            )}
-          </section>
-        )}
-
-        {!instagramLoading && instagramStatus?.enabled && (
-          <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-            <h2 className="text-lg font-semibold mb-4">Instagram</h2>
-            {instagramStatus.connected ? (
-              <div className="space-y-3">
-                <p className="text-sm">
-                  Connected as{" "}
-                  <span className="font-medium">
-                    @{instagramStatus.username}
+                  <span className="rounded border border-border px-1.5 py-0.5 text-[10px] uppercase tracking-wider text-ink-lo">
+                    {SOURCE_LABEL[t.source]}
                   </span>
-                  {instagramStatus.account_type && (
-                    <span className="text-zinc-500">
-                      {" "}
-                      ({instagramStatus.account_type.toLowerCase()})
-                    </span>
-                  )}
-                </p>
-                {instagramStatus.expires_at && (
-                  <p className="text-xs text-zinc-500">
-                    Token expires:{" "}
-                    {new Date(instagramStatus.expires_at).toLocaleString()}
-                  </p>
-                )}
-                <button
-                  onClick={disconnectInstagram}
-                  className="text-xs text-zinc-400 hover:text-white underline"
-                >
-                  Disconnect
-                </button>
-              </div>
-            ) : (
-              <div className="space-y-3">
-                <p className="text-xs text-zinc-500">
-                  Instagram uses Meta&apos;s OAuth (Instagram Login). Requires a
-                  Creator/Business account. You&apos;ll be redirected to
-                  authorize, then back here.
-                </p>
-                <button
-                  onClick={connectInstagram}
-                  disabled={instagramConnecting}
-                  className="rounded bg-white text-black font-medium px-5 py-2.5 text-sm hover:bg-zinc-200 disabled:opacity-50"
-                >
-                  {instagramConnecting ? "Redirecting…" : "Connect Instagram"}
-                </button>
-              </div>
-            )}
-            {instagramError && (
-              <p className="text-red-400 text-xs mt-4 font-mono break-all">
-                {instagramError}
-              </p>
-            )}
-          </section>
+                  <span className="min-w-0 flex-1 truncate text-sm text-ink-hi">
+                    {t.title}
+                  </span>
+                  <span className="shrink-0 text-xs text-ink-lo">
+                    {relativeFromNow(t.created_at, now)}
+                  </span>
+                </a>
+              </li>
+            ))}
+          </ul>
         )}
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-1">Trends</h2>
-          <p className="text-sm text-zinc-500 mb-4">
-            Fresh items from RSS + HackerNews. Pull more on demand or wait for the
-            6-hour cron.
-          </p>
-          <Link
-            href="/trends"
-            className="inline-block rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200"
-          >
-            Browse trends →
-          </Link>
-        </section>
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-1">Drafts</h2>
-          <p className="text-sm text-zinc-500 mb-4">
-            Generate founder-voice drafts from unconsumed trends. Review,
-            edit, approve, and schedule them here.
-          </p>
-          <Link
-            href="/drafts"
-            className="inline-block rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200"
-          >
-            Open drafts →
-          </Link>
-        </section>
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-1">Scheduled</h2>
-          <p className="text-sm text-zinc-500 mb-4">
-            Approved posts waiting for their publish slot, next-up first.
-          </p>
-          <Link
-            href="/scheduled"
-            className="inline-block rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200"
-          >
-            View scheduled →
-          </Link>
-        </section>
-
-        <section className="rounded border border-zinc-800 bg-zinc-950/50 p-6">
-          <h2 className="text-lg font-semibold mb-1">Published</h2>
-          <p className="text-sm text-zinc-500 mb-4">
-            What&apos;s already gone live, most recent first. Each row links to
-            the LinkedIn post.
-          </p>
-          <Link
-            href="/published"
-            className="inline-block rounded bg-white text-black font-medium px-4 py-2 text-sm hover:bg-zinc-200"
-          >
-            View published →
-          </Link>
-        </section>
-
-      </div>
+      </section>
     </main>
+  );
+}
+
+function Counter({
+  href,
+  label,
+  value,
+  sub,
+  alert = false,
+}: {
+  href: string;
+  label: string;
+  value: string;
+  sub: string;
+  alert?: boolean;
+}) {
+  return (
+    <Link
+      href={href}
+      className={
+        "flex flex-col rounded-md border bg-surface-1 px-5 py-4 transition-colors hover:border-ink-lo " +
+        (alert ? "border-status-failed/40" : "border-border")
+      }
+    >
+      <span className="text-xs uppercase tracking-wider text-ink-lo">
+        {label}
+      </span>
+      <span
+        className={
+          "mt-1 font-serif text-3xl " +
+          (alert ? "text-status-failed" : "text-ink-hi")
+        }
+      >
+        {value}
+      </span>
+      <span className="mt-1 text-xs text-ink-mid">{sub}</span>
+    </Link>
   );
 }
 
 export default function HomePage() {
   return (
-    <Suspense
-      fallback={<div className="flex-1 p-8 text-zinc-500">Loading…</div>}
-    >
-      <Dashboard />
+    <Suspense fallback={<main className="flex-1 p-8 text-ink-lo">Loading…</main>}>
+      <Today />
     </Suspense>
   );
 }
