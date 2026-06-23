@@ -9,6 +9,7 @@ from app.api import (
     auth_mastodon,
     auth_threads,
     posts,
+    prompts,
     templates,
     trends,
 )
@@ -21,6 +22,7 @@ api_router.include_router(auth_threads.router)
 api_router.include_router(auth_instagram.router)
 api_router.include_router(trends.router)
 api_router.include_router(posts.router)
+api_router.include_router(prompts.router)
 api_router.include_router(templates.router)
 
 __all__ = ["api_router"]
