@@ -56,13 +56,13 @@ def _public_url_for(path: str) -> str:
     return f"{base}/storage/v1/object/public/{bucket}/{path}"
 
 
-def _upload_sync(path: str, png_bytes: bytes) -> dict[str, Any]:
+def _upload_sync(path: str, data: bytes, content_type: str) -> dict[str, Any]:
     client = _get_client()
     return client.storage.from_(settings.SUPABASE_STORAGE_BUCKET).upload(
         path=path,
-        file=png_bytes,
+        file=data,
         file_options={
-            "content-type": "image/png",
+            "content-type": content_type,
             # Asset IDs are uuid4 — collisions impossible, so upsert=false
             # treats any unexpected collision as a bug worth surfacing.
             "upsert": "false",
@@ -70,18 +70,23 @@ def _upload_sync(path: str, png_bytes: bytes) -> dict[str, Any]:
     )
 
 
-async def upload_png(path: str, png_bytes: bytes) -> str:
-    """Upload PNG bytes to the configured bucket under `path`. Returns public URL.
+async def upload_image(
+    path: str, data: bytes, *, content_type: str = "image/png"
+) -> str:
+    """Upload image bytes to the configured bucket under `path`. Returns public URL.
 
-    `path` is the within-bucket key, e.g. `<post_id>/<asset_id>.png`. The renderer
-    builds this; storage just stores it.
+    `path` is the within-bucket key, e.g. `<post_id>/<asset_id>.png` (or `.jpg`).
+    `content_type` must match the encoding — `image/png` for templated cards,
+    `image/jpeg` for photographic AI images. The renderer builds `path` +
+    `content_type`; storage just stores it.
     """
-    await asyncio.to_thread(_upload_sync, path, png_bytes)
+    await asyncio.to_thread(_upload_sync, path, data, content_type)
     url = _public_url_for(path)
     log.info(
         "supabase_storage.uploaded",
         path=path,
-        bytes=len(png_bytes),
+        bytes=len(data),
+        content_type=content_type,
         url=url,
     )
     return url

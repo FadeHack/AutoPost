@@ -65,11 +65,16 @@ async def html_to_png(
     width: int,
     height: int,
     device_scale_factor: int = 2,
+    image_format: str = "png",
+    quality: int | None = None,
 ) -> bytes:
-    """Render an HTML string to a PNG byte string at `width × height` logical px.
+    """Render an HTML string to image bytes at `width × height` logical px.
 
     `device_scale_factor=2` produces a 2× image (retina-crisp at LinkedIn's
-    display size). Returned bytes are PNG-encoded.
+    display size). `image_format` is 'png' (lossless — right for text/graphic
+    templates) or 'jpeg' (right for full-frame photographic AI images, where a
+    lossless 2× PNG balloons past storage limits). `quality` (1-100) applies to
+    JPEG only; ignored for PNG.
 
     Each call uses its own browser context so isolation is total — no cookie /
     localStorage / cache bleed between renders. The browser process itself is
@@ -89,6 +94,9 @@ async def html_to_png(
         # injects a <style> synchronously after parse, so we also wait for
         # networkidle to make sure the CDN response has settled before screenshot.
         await page.set_content(html, wait_until="networkidle")
-        return await page.screenshot(type="png", full_page=False)
+        shot_kwargs: dict = {"type": image_format, "full_page": False}
+        if image_format == "jpeg" and quality is not None:
+            shot_kwargs["quality"] = quality
+        return await page.screenshot(**shot_kwargs)
     finally:
         await context.close()

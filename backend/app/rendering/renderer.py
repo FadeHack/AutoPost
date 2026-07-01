@@ -74,6 +74,11 @@ AI_IMAGE_FRAME_TEMPLATES: dict[str, str] = {
 }
 DEFAULT_AI_IMAGE_FRAME = "card"
 
+# AI images render as JPEG (photographic → PNG is too large for the storage
+# object cap). q85 is a strong quality/size balance; LinkedIn recompresses
+# uploads anyway so higher offers no visible gain.
+AI_IMAGE_JPEG_QUALITY = 85
+
 
 _jinja_env = Environment(
     loader=FileSystemLoader(TEMPLATES_DIR),
@@ -184,10 +189,18 @@ async def render_png(
     *,
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
+    image_format: str = "png",
+    quality: int | None = None,
 ) -> bytes:
-    """Jinja2 → HTML → PNG bytes. Requires playwright_runner to be started."""
+    """Jinja2 → HTML → image bytes. Requires playwright_runner to be started.
+
+    Defaults to PNG (text/graphic templates). Pass `image_format='jpeg'` +
+    `quality` for photographic AI-image renders that would be too large as PNG.
+    """
     html = render_html(template_name, context)
-    return await playwright_runner.html_to_png(html, width=width, height=height)
+    return await playwright_runner.html_to_png(
+        html, width=width, height=height, image_format=image_format, quality=quality
+    )
 
 
 async def _pick_template(
@@ -283,7 +296,7 @@ async def _render_template(
 
     asset_id = uuid4()
     rel_path = f"{post.id}/{asset_id}.png"
-    await storage.upload_png(rel_path, png_bytes)
+    await storage.upload_image(rel_path, png_bytes)
 
     asset = GeneratedAsset(
         id=asset_id,
@@ -398,13 +411,18 @@ async def _render_ai_image(
         "category_label": category_label,
         "image_data_uri": data_uri,
     }
-    png_bytes = await render_png(
-        template.html_path, context, width=width, height=height
+    # JPEG, not PNG: these frames are full-frame photographs. A lossless 2×
+    # PNG runs ~4MB and tips past the storage object-size cap on detailed
+    # images; JPEG q85 is ~0.5-1MB at the same resolution. Text-card templates
+    # stay PNG (see _render_template) where lossless text matters.
+    img_bytes = await render_png(
+        template.html_path, context, width=width, height=height,
+        image_format="jpeg", quality=AI_IMAGE_JPEG_QUALITY,
     )
 
     asset_id = uuid4()
-    rel_path = f"{post.id}/{asset_id}.png"
-    await storage.upload_png(rel_path, png_bytes)
+    rel_path = f"{post.id}/{asset_id}.jpg"
+    await storage.upload_image(rel_path, img_bytes, content_type="image/jpeg")
 
     asset = GeneratedAsset(
         id=asset_id,
@@ -426,7 +444,7 @@ async def _render_ai_image(
         template=template.name,
         asset_id=str(asset.id),
         flux_bytes=len(flux_bytes),
-        composite_bytes=len(png_bytes),
+        composite_bytes=len(img_bytes),
         prompt_preview=prompt_str[:80],
     )
     return asset
@@ -485,7 +503,7 @@ async def render_post_carousel(
         )
         asset_id = uuid4()
         rel_path = f"{post.id}/{asset_id}.png"
-        await storage.upload_png(rel_path, png_bytes)
+        await storage.upload_image(rel_path, png_bytes)
 
         asset = GeneratedAsset(
             id=asset_id,
@@ -501,7 +519,7 @@ async def render_post_carousel(
         assets.append(asset)
 
     # One commit at the end so a mid-loop failure leaves no partial state.
-    # If render_png or upload_png raises mid-loop, no rows persist.
+    # If render_png or upload_image raises mid-loop, no rows persist.
     await session.commit()
     for a in assets:
         await session.refresh(a)

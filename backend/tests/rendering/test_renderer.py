@@ -472,17 +472,20 @@ class TestRenderAIImageTemplateSelection:
             loaded["name"] = name
             return SimpleNamespace(id=uuid4(), name=name, html_path=f"{name}.html")
 
-        async def fake_render_png(html_path, context, *, width, height):
-            return b"final-png"
+        async def fake_render_png(html_path, context, *, width, height, **kw):
+            loaded["image_format"] = kw.get("image_format", "png")
+            return b"final-img"
 
-        async def fake_upload(rel_path, png):
+        async def fake_upload(rel_path, data, **kw):
+            loaded["upload_path"] = rel_path
+            loaded["content_type"] = kw.get("content_type", "image/png")
             return None
 
         monkeypatch.setattr(renderer, "_ensure_ai_image_prompt", fake_ensure_prompt)
         monkeypatch.setattr(renderer, "generate_image", fake_generate_image)
         monkeypatch.setattr(renderer, "_load_template_by_name", fake_load_by_name)
         monkeypatch.setattr(renderer, "render_png", fake_render_png)
-        monkeypatch.setattr(renderer.storage, "upload_png", fake_upload)
+        monkeypatch.setattr(renderer.storage, "upload_image", fake_upload)
 
         session = MagicMock()
         session.add = MagicMock()
@@ -495,3 +498,7 @@ class TestRenderAIImageTemplateSelection:
         )
 
         assert loaded["name"] == expected_name
+        # AI images are always encoded/stored as JPEG regardless of frame.
+        assert loaded["image_format"] == "jpeg"
+        assert loaded["content_type"] == "image/jpeg"
+        assert loaded["upload_path"].endswith(".jpg")

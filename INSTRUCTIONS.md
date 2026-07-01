@@ -65,8 +65,8 @@ LinkedIn publisher can fetch them via URL. One-time setup:
 1. Supabase dashboard → your project → **Storage** → **New bucket**
 2. **Name:** `autopost-assets` (must match `SUPABASE_STORAGE_BUCKET` in `backend/.env`)
 3. **Public bucket:** ✅ on
-4. **Allowed MIME types:** `image/png` (optional, tightens the bucket)
-5. **File size limit:** `5 MB` (optional, sensible cap)
+4. **Allowed MIME types:** leave blank, or `image/png, image/jpeg` (optional). Templated cards upload as PNG; AI images upload as **JPEG** (photographic — PNG blows past the size cap). If you restrict this to `image/png` only, AI-image renders will fail with a 400.
+5. **File size limit:** `5 MB` (optional). AI images render as JPEG q85 (~0.3–1 MB), well under this; templated PNGs are ~1–2 MB.
 
 No new credential is needed — backend writes use the existing
 `SUPABASE_SERVICE_ROLE_KEY`, which bypasses storage RLS.
