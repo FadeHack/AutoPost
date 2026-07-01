@@ -176,9 +176,11 @@ The forcing function is the three-pane cockpit — it can't survive on a phone.
 
 | Breakpoint | Behavior |
 |---|---|
-| **Desktop ≥1024px** | Left rail + full multi-pane cockpit; calendar grid; board columns side by side. |
-| **Tablet 768–1024** | Rail collapses to icons; cockpit drops to two panes (editor **or** preview, toggled). |
-| **Mobile <768** | Rail → bottom tab bar (Today/Inbox/Drafts/Calendar). Cockpit **stacks**: preview first (what you judge on the go), then editor, sticky ActionBar at bottom. Calendar → agenda list. |
+| **Desktop ≥1280px** | Left rail + full multi-pane cockpit; calendar grid; board columns side by side. Rail **defaults expanded**. |
+| **Tablet 768–1279** | Rail **defaults collapsed** to icons; cockpit drops to two panes (editor **or** preview, toggled). |
+| **Mobile <768** | Rail → **bottom tab bar** (primary nav) + a slim **top app bar** (brand switch, Settings, token-health dot, account/sign-out) so no rail affordance is lost. Cockpit **stacks**: preview first (what you judge on the go), then editor, sticky ActionBar at bottom. Calendar → agenda list. |
+
+**Rail collapse is user-controlled, not just a breakpoint.** The default expanded/collapsed state follows the 1280px line, but the user pins either state via a toggle in the rail footer (or the `[` shortcut), persisted to `localStorage` (`autopost:rail-collapsed`). When collapsed, hovering the icon rail **peeks** the full labelled rail as an opaque overlay so navigation clarity is never lost. Mobile keeps the bottom tab bar regardless (no collapse concept there).
 
 **Mobile's real job is approve-on-the-go:** review the per-platform preview, tweak a word, approve or publish. Full multi-pane authoring stays a desktop act — drafts at the desk, approvals from the couch.
 
