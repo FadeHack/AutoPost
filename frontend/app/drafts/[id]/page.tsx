@@ -97,6 +97,16 @@ type PublishingLog = {
 
 type RenderKind = "template" | "ai_image";
 
+// How much brand chrome wraps an AI image: full brand card, full-bleed with a
+// small corner mark, or full-bleed with no chrome. Mirrors RenderRequest.frame.
+type AIImageFrame = "card" | "mark" | "none";
+
+const AI_IMAGE_FRAMES: { value: AIImageFrame; label: string }[] = [
+  { value: "card", label: "Brand card" },
+  { value: "mark", label: "Brand mark" },
+  { value: "none", label: "Full bleed" },
+];
+
 type GeneratedAsset = {
   id: string;
   post_id: string;
@@ -146,6 +156,10 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [assets, setAssets] = useState<GeneratedAsset[]>([]);
   const [templates, setTemplates] = useState<Template[]>([]);
   const [selectedTemplateId, setSelectedTemplateId] = useState<string>("");
+  // Only used for the AI-image path: how much brand chrome wraps the Flux
+  // image. 'card' = full brand card, 'mark' = full-bleed + corner mark,
+  // 'none' = full-bleed no chrome.
+  const [frame, setFrame] = useState<AIImageFrame>("card");
   const [pane, setPane] = useState<"editor" | "preview">("preview");
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
@@ -458,6 +472,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
       if (isAIImageRender) {
         const asset = await apiPost<GeneratedAsset>(`/posts/${id}/render`, {
           kind: "ai_image",
+          frame,
         });
         setAssets((prev) => [asset, ...prev]);
         return;
@@ -480,7 +495,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
     } finally {
       setRendering(false);
     }
-  }, [id, selectedTemplateId, isAIImageRender, isCarouselRender, post]);
+  }, [id, selectedTemplateId, isAIImageRender, isCarouselRender, frame, post]);
 
   const templateNameById = (tid: string): string =>
     templates.find((t) => t.id === tid)?.name ?? tid.slice(0, 8);
@@ -716,13 +731,32 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
           <option value="">Auto for category</option>
           <option value={AI_IMAGE_OPTION}>✦ AI image (Flux)</option>
           {templates
-            .filter((t) => t.name !== "ai_image_wrap")
+            .filter((t) => !t.name.startsWith("ai_image_"))
             .map((t) => (
               <option key={t.id} value={t.id}>
                 {t.name} ({t.category})
               </option>
             ))}
         </select>
+
+        {isAIImageRender && (
+          <div className="flex rounded-md border border-border bg-surface-2 p-0.5 text-xs">
+            {AI_IMAGE_FRAMES.map((f) => (
+              <button
+                key={f.value}
+                type="button"
+                onClick={() => setFrame(f.value)}
+                className={`flex-1 rounded px-2 py-1 transition-colors ${
+                  frame === f.value
+                    ? "bg-surface-1 text-ink-hi"
+                    : "text-ink-lo hover:text-ink-hi"
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
+        )}
 
         <ActionButton
           onClick={renderVisual}

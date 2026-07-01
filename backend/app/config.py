@@ -100,6 +100,11 @@ class Settings(BaseSettings):
     AI_IMAGE_WIDTH: int = 800
     AI_IMAGE_HEIGHT: int = 800
     AI_IMAGE_TIMEOUT_SECONDS: float = 30.0
+    # When True, append the brand style suffix (dark/editorial, muted palette)
+    # to every AI-image prompt so generations composite cleanly into the
+    # brand-wrap. When False (default), Flux is free to choose the palette and
+    # lighting that best fit the subject — no forced black framing.
+    AI_IMAGE_BRAND_STYLE: bool = False
 
     @property
     def linkedin_scope_list(self) -> list[str]:

@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>{{ hook|truncate(60) }}</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+      html, body { margin: 0; padding: 0; background: #000; }
+      .sans { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    </style>
+  </head>
+  <body>
+    <!-- Lighter-touch frame: the Flux image fills the whole 1200x1200 frame,
+         with just a small Nestwhirr brand mark in the bottom-left corner over a
+         subtle scrim (so it stays legible on any image). No full black card. -->
+    <div class="relative w-[1200px] h-[1200px]">
+      <img
+        src="{{ image_data_uri }}"
+        alt=""
+        class="absolute inset-0 w-[1200px] h-[1200px] object-cover"
+      />
+
+      <!-- Legibility scrim under the mark -->
+      <div class="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-black/70 to-transparent"></div>
+
+      <!-- Brand mark: accent line + wordmark, per the minimal-dark identity -->
+      <div class="absolute bottom-12 left-12">
+        <div class="w-12 h-px bg-zinc-200 mb-3"></div>
+        <div class="sans text-zinc-100 uppercase tracking-widest text-lg">
+          {{ brand_name }}
+        </div>
+      </div>
+    </div>
+  </body>
+</html>

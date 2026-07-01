@@ -412,3 +412,86 @@ class TestAIImageWrapTemplate:
         # Jinja2 autoescape is on for html → tags become entities.
         assert "<script>" not in out
         assert "&lt;script&gt;" in out
+
+
+class TestAIImageBareTemplate:
+    """Full-bleed (no-brand-frame) AI-image template — pure Jinja2."""
+
+    def test_renders_full_bleed_without_brand_chrome(self):
+        from app.rendering.renderer import render_html
+
+        data_uri = "data:image/png;base64,AAAA"
+        out = render_html("ai_image_bare.html", {"hook": "h", "image_data_uri": data_uri})
+
+        assert data_uri in out
+        # Full-bleed 1200x1200, no brand strap / eyebrow text.
+        assert "1200px" in out
+        assert "Nestwhirr" not in out
+
+
+class TestAIImageMarkTemplate:
+    """Lighter-touch frame: full-bleed image + small corner brand mark."""
+
+    def test_renders_full_bleed_with_brand_mark(self):
+        from app.rendering.renderer import render_html
+
+        data_uri = "data:image/png;base64,AAAA"
+        out = render_html(
+            "ai_image_mark.html",
+            {"hook": "h", "brand_name": "Nestwhirr", "image_data_uri": data_uri},
+        )
+
+        assert data_uri in out
+        assert "1200px" in out  # full-bleed
+        assert "Nestwhirr" in out  # brand mark present
+
+
+class TestRenderAIImageTemplateSelection:
+    """`_render_ai_image` picks the template off the `frame` value."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "frame, expected_name",
+        [
+            ("card", "ai_image_wrap"),
+            ("mark", "ai_image_mark"),
+            ("none", "ai_image_bare"),
+            ("bogus", "ai_image_wrap"),  # unknown → default card
+        ],
+    )
+    async def test_frame_selects_template(self, monkeypatch, frame, expected_name):
+        loaded: dict = {}
+
+        async def fake_ensure_prompt(session, post):
+            return "a stone on a table"
+
+        async def fake_generate_image(prompt):
+            return b"\x89PNG-stub"
+
+        async def fake_load_by_name(session, name):
+            loaded["name"] = name
+            return SimpleNamespace(id=uuid4(), name=name, html_path=f"{name}.html")
+
+        async def fake_render_png(html_path, context, *, width, height):
+            return b"final-png"
+
+        async def fake_upload(rel_path, png):
+            return None
+
+        monkeypatch.setattr(renderer, "_ensure_ai_image_prompt", fake_ensure_prompt)
+        monkeypatch.setattr(renderer, "generate_image", fake_generate_image)
+        monkeypatch.setattr(renderer, "_load_template_by_name", fake_load_by_name)
+        monkeypatch.setattr(renderer, "render_png", fake_render_png)
+        monkeypatch.setattr(renderer.storage, "upload_png", fake_upload)
+
+        session = MagicMock()
+        session.add = MagicMock()
+        session.commit = AsyncMock()
+        session.refresh = AsyncMock()
+
+        post = _make_post(extracts={"ai_image_prompt": "x"})
+        await renderer._render_ai_image(
+            session, post, template_id=None, width=1200, height=1200, frame=frame
+        )
+
+        assert loaded["name"] == expected_name

@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -647,6 +647,10 @@ class RenderRequest(BaseModel):
     # 'template' (default) → Playwright + HTML template. 'ai_image' → Flux
     # generation composited into the ai_image_wrap brand template.
     kind: RenderKind = RenderKind.template
+    # Only applies to kind='ai_image'. How much brand chrome wraps the Flux
+    # image: 'card' (default) = full black brand card, 'mark' = full-bleed +
+    # small corner brand mark, 'none' = full-bleed no chrome.
+    frame: Literal["card", "mark", "none"] = "card"
 
 
 class GeneratedAssetRead(BaseModel):
@@ -684,6 +688,7 @@ async def render(
             template_id=body.template_id,
             slide_index=body.slide_index,
             kind=body.kind,
+            frame=body.frame,
         )
     except ValueError as e:
         raise HTTPException(

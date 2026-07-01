@@ -37,7 +37,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 import base64
 
 from app.config import settings
-from app.intelligence.generator import extract_ai_image_prompt, extract_visual_fields
+from app.intelligence.generator import (
+    AI_IMAGE_BRAND_STYLE_SUFFIX,
+    extract_ai_image_prompt,
+    extract_visual_fields,
+)
 from app.models.base import PostCategory, RenderKind
 from app.models.generated_asset import GeneratedAsset
 from app.models.post import Post
@@ -54,9 +58,21 @@ TEMPLATES_DIR = Path(__file__).resolve().parent / "templates"
 DEFAULT_WIDTH = 1200
 DEFAULT_HEIGHT = 1200
 
-# Name of the brand-wrap template that composites a Flux-generated image inside
-# the Nestwhirr minimal-dark identity. Seeded in migration 3b27fdcf2346.
+# AI-image frame options → template name. Chosen per render via the request's
+# `frame` field; the operator picks how much brand chrome wraps the Flux image:
+#   card → full black brand card, image inset 800x800 (seeded 3b27fdcf2346)
+#   mark → full-bleed image + small corner brand mark (seeded a3d1e6f92c74)
+#   none → full-bleed image, no chrome at all (seeded f2c9a7d41b60)
 AI_IMAGE_WRAP_TEMPLATE = "ai_image_wrap"
+AI_IMAGE_MARK_TEMPLATE = "ai_image_mark"
+AI_IMAGE_BARE_TEMPLATE = "ai_image_bare"
+
+AI_IMAGE_FRAME_TEMPLATES: dict[str, str] = {
+    "card": AI_IMAGE_WRAP_TEMPLATE,
+    "mark": AI_IMAGE_MARK_TEMPLATE,
+    "none": AI_IMAGE_BARE_TEMPLATE,
+}
+DEFAULT_AI_IMAGE_FRAME = "card"
 
 
 _jinja_env = Environment(
@@ -202,6 +218,7 @@ async def render_post(
     width: int = DEFAULT_WIDTH,
     height: int = DEFAULT_HEIGHT,
     kind: RenderKind = RenderKind.template,
+    frame: str = DEFAULT_AI_IMAGE_FRAME,
 ) -> GeneratedAsset:
     """Render a post → write PNG to disk → persist GeneratedAsset row.
 
@@ -210,8 +227,10 @@ async def render_post(
 
     `kind` selects the renderer backend:
       - `RenderKind.template` (default) — Playwright + Jinja2 HTML template.
-      - `RenderKind.ai_image` — AI-generated Flux image composited inside the
-        Nestwhirr brand-wrap template. Implemented in Chunk D.
+      - `RenderKind.ai_image` — AI-generated Flux image. `frame` picks how much
+        brand chrome wraps it: 'card' (default) = full brand card, 'mark' =
+        full-bleed + small corner brand mark, 'none' = full-bleed no chrome.
+        `frame` is ignored for `RenderKind.template`.
 
     If `post.extracts` is None (older draft predating Stage 4), runs Stage 4
     inline against `post.body` and persists the result. Adds ~1s to the first
@@ -234,7 +253,7 @@ async def render_post(
 
     if kind is RenderKind.ai_image:
         return await _render_ai_image(
-            session, post, template_id=template_id, width=width, height=height
+            session, post, template_id=template_id, width=width, height=height, frame=frame
         )
     return await _render_template(
         session,
@@ -334,24 +353,32 @@ async def _render_ai_image(
     template_id: UUID | None,
     width: int,
     height: int,
+    frame: str = DEFAULT_AI_IMAGE_FRAME,
 ) -> GeneratedAsset:
-    """AI-image path: Flux bytes → brand-wrap composite → asset row.
+    """AI-image path: Flux bytes → composite → asset row.
 
     Steps:
       1. Resolve the Stage-5 visual prompt (Chunk C), lazily backfilling on
          older drafts that predate Phase 10.
       2. Call `generate_image(prompt)` — Cloudflare flux-1-schnell primary,
          Pollinations fallback (composer in app.rendering.ai_image).
-      3. Base64-encode the Flux bytes into a data URI and render the
-         `ai_image_wrap.html` template — a 1200x1200 wrapper with the AI image
-         inset at 800x800 plus the Nestwhirr brand strap.
+      3. Base64-encode the Flux bytes into a data URI and render the AI-image
+         template picked by `frame` (see `AI_IMAGE_FRAME_TEMPLATES`): 'card' =
+         full brand card (image inset 800x800 + strap), 'mark' = full-bleed +
+         small corner brand mark, 'none' = full-bleed no chrome. All 1200x1200.
       4. Playwright → final PNG → Supabase upload → GeneratedAsset row.
 
-    `template_id` is honored when present so future variants of the brand
-    wrapper (different layouts) can be selected explicitly. Default behavior
-    loads the seeded `ai_image_wrap` template by name.
+    An explicit `template_id` always wins and overrides the `frame` template
+    pick — that's the escape hatch for future brand-wrap variants. An unknown
+    `frame` falls back to the default ('card').
     """
     prompt_str = await _ensure_ai_image_prompt(session, post)
+
+    # Stage 5 writes a palette-neutral subject. Append the brand style suffix
+    # only when the operator opts in — otherwise Flux is free to choose the
+    # palette/lighting that best fit the subject (no forced black framing).
+    if settings.AI_IMAGE_BRAND_STYLE:
+        prompt_str = f"{prompt_str} {AI_IMAGE_BRAND_STYLE_SUFFIX}"
 
     flux_bytes = await generate_image(prompt_str)
     data_uri = "data:image/png;base64," + base64.b64encode(flux_bytes).decode("ascii")
@@ -361,7 +388,8 @@ async def _render_ai_image(
         if template is None:
             raise ValueError(f"template {template_id} not found")
     else:
-        template = await _load_template_by_name(session, AI_IMAGE_WRAP_TEMPLATE)
+        name = AI_IMAGE_FRAME_TEMPLATES.get(frame, AI_IMAGE_WRAP_TEMPLATE)
+        template = await _load_template_by_name(session, name)
 
     category_label = _CATEGORY_LABELS.get(post.category, post.category.value)
     context = {

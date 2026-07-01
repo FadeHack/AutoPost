@@ -4,7 +4,7 @@ Stage 1: angle synthesis    — primary model (llama-3.3-70b-versatile)
 Stage 2: founder-voice rewrite — primary model + deterministic AI-tell strip
 Stage 3: structured extract → hook/body/tags JSON — FAST model (llama-3.1-8b-instant)
 Stage 4: visual extract → pull_quote / metric / carousel_slides JSON — FAST model
-Stage 5: AI-image prompt → one short visual prompt string for Flux — FAST model
+Stage 5: AI-image prompt → one short visual prompt string for Flux — primary model (llama-3.3-70b-versatile)
 
 `run_pipeline()` is pure (LLM only, no DB) so it can be unit-tested with a
 mocked groq_client. `generate_draft()` wraps it with the DB orchestration:
@@ -53,7 +53,7 @@ ANGLE_MAX_TOKENS = 500
 VOICE_MAX_TOKENS = 450
 EXTRACT_MAX_TOKENS = 600
 VISUAL_EXTRACT_MAX_TOKENS = 600
-AI_IMAGE_PROMPT_MAX_TOKENS = 200
+AI_IMAGE_PROMPT_MAX_TOKENS = 300  # 30-60 word subject + JSON wrapper
 
 MAX_CAROUSEL_SLIDES = 3
 
@@ -151,31 +151,45 @@ Return a JSON object with these keys exactly:
 Return only the JSON object. No preamble. No explanation."""
 
 
-# Brand visual identity per [[project_visual_style]] — minimal dark. The model
-# must respect this so generated images composite cleanly inside the brand-wrap
-# template (black bg, serif headline, sans body, accent line above brand strap).
-_AI_IMAGE_PROMPT_SYSTEM = """You write a short visual prompt for an AI image generator (Flux).
+# Stage-5 prompt writer. Produces a SUBJECT-only visual prompt following FLUX
+# structure (subject → environment → light behavior → lens). It deliberately
+# does NOT force a palette or background — the optional brand style is appended
+# separately at render time via `AI_IMAGE_BRAND_STYLE_SUFFIX` when
+# `settings.AI_IMAGE_BRAND_STYLE` is on. FLUX weights the first tokens most, so
+# style modifiers belong at the end (the suffix), not baked into the subject.
+_AI_IMAGE_PROMPT_SYSTEM = """You write a visual prompt for the FLUX image model that pairs with a LinkedIn post.
 
-Read the LinkedIn post below. Produce ONE concrete visual that pairs with it.
+Read the post below. Invent ONE concrete visual that captures its core idea — a single object, a single scene, or a single metaphor. Not a literal illustration of the words.
 
 Return strict JSON:
 {
-  "ai_image_prompt": "<one sentence visual prompt, 12-25 words>"
+  "ai_image_prompt": "<the visual prompt>"
 }
 
-Rules:
-- Minimal, dark, editorial. Black or near-black background. Soft contrast.
-- One subject. Concrete and grounded — a single object, a single scene, a single metaphor.
-- Photographic OR minimalist illustration style. Never cartoon. Never collage.
-- No text in the image. No logos. No watermarks. No people's faces.
-- 12-25 words. No preamble, no apology, no "an image of".
-- The prompt should make sense even if a reader never sees the post.
+How to write it (FLUX reads natural language, not keyword lists):
+- Lead with the SUBJECT. FLUX weights the first words most, so name the main thing first.
+- Then describe, in order: what it is doing / the environment around it / how the light behaves (its direction, quality, and the shadows it casts) / a camera or lens reference if the style is photographic.
+- 30-60 words. One flowing description, not a bulleted list.
+- One subject only. Concrete and grounded.
+- Do NOT force a color palette or background color — choose whatever best fits the subject.
+- No text, letters, logos, watermarks, or readable signage in the image. No identifiable faces.
+- No weight syntax like (word:1.2), no "--" flags, no negatives ("without", "no ...").
 
 Bad: "a vibrant colorful cityscape with people"
-Good: "a single empty coffee cup on a dark wooden desk, soft side light, shallow depth of field"
-Good: "minimalist illustration of a rope being cut by scissors, off-white on near-black, high contrast"
+Good: "A single frayed climbing rope stretched taut across a weathered wooden workbench, one strand beginning to snap, hard raking light from the left throwing long shadows across the grain, shot on a 50mm lens, shallow depth of field."
 
 Return only the JSON object. No preamble."""
+
+
+# Optional brand style suffix. Appended to the Stage-5 subject at render time
+# only when `settings.AI_IMAGE_BRAND_STYLE` is True, so images composite into
+# the minimal-dark brand-wrap per [[project_visual_style]]. Kept as a suffix
+# (not baked into the subject) because FLUX weights trailing tokens as global
+# style modifiers.
+AI_IMAGE_BRAND_STYLE_SUFFIX = (
+    "Minimalist editorial photography, deep near-black background, "
+    "muted desaturated palette, soft low-key side lighting, subtle film grain."
+)
 
 # Fallback prompt used when Stage 5 fails entirely (bad JSON, network error,
 # all model attempts produced empty strings). Keeps the brand identity even if
@@ -200,9 +214,13 @@ _BLUESKY_FALLBACK_COMMENTARY = (
     "Most takes on this miss the point. Builders ship; analysts narrate."
 )
 
+# Style-neutral subject used when Stage 5 fails (bad JSON, network error, empty
+# output). The brand style suffix is applied separately at render time, so this
+# stays palette-neutral like a normal Stage-5 subject.
 _AI_IMAGE_PROMPT_FALLBACK = (
-    "minimalist editorial illustration on a near-black background, "
-    "soft contrast, one subject centered, no text"
+    "A single smooth stone resting on a plain flat surface, soft directional "
+    "light from one side casting a long shadow, shot on a 50mm lens, shallow "
+    "depth of field"
 )
 
 
@@ -427,11 +445,15 @@ async def extract_ai_image_prompt(
 
     Falls back to `_AI_IMAGE_PROMPT_FALLBACK` if the model returns bad JSON or
     an empty string. The renderer can trust the return value is always usable.
-    Cost target: <$0.0002/post on `llama-3.1-8b-instant`.
+    Runs on the primary 70B model — the 8B fast tier produced weak, generic
+    visual prompts for this task.
     """
+    # Primary 70B, not the 8B fast model: writing a concise, evocative 12-25
+    # word visual prompt is a small but genuinely creative task the 8B model
+    # underperforms on. One ~200-token call per post, so cost is negligible.
     raw = await groq_client.chat(
         stage="ai_image_prompt",
-        model=settings.GROQ_MODEL_FAST,
+        model=settings.GROQ_MODEL_PRIMARY,
         prompt_id=prompt_id,
         post_id=post_id,
         messages=[
@@ -543,7 +565,7 @@ async def run_pipeline(
 
     # Stage 5 — AI-image prompt. Persisted onto the same extracts JSONB so
     # render_post can switch between template and AI-image kinds without an
-    # extra DB lookup. Cheap (<$0.0002 on llama-3.1-8b-instant).
+    # extra DB lookup. Runs on the primary 70B model for prompt quality.
     ai_image_prompt = await extract_ai_image_prompt(
         voiced_text=voiced, prompt_id=prompt.id
     )

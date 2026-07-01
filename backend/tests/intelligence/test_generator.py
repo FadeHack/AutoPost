@@ -177,7 +177,7 @@ class TestRunPipeline:
         assert calls[1]["model"] == settings.GROQ_MODEL_PRIMARY
         assert calls[2]["model"] == settings.GROQ_MODEL_FAST
         assert calls[3]["model"] == settings.GROQ_MODEL_FAST
-        assert calls[4]["model"] == settings.GROQ_MODEL_FAST
+        assert calls[4]["model"] == settings.GROQ_MODEL_PRIMARY  # Stage 5 image prompt
 
         # prompt_id propagated to every call.
         assert all(c["prompt_id"] == prompt.id for c in calls)
@@ -427,7 +427,7 @@ class TestExtractAIImagePrompt:
 
         assert len(calls) == 1
         assert calls[0]["stage"] == "ai_image_prompt"
-        assert calls[0]["model"] == settings.GROQ_MODEL_FAST
+        assert calls[0]["model"] == settings.GROQ_MODEL_PRIMARY
         assert calls[0]["response_format"] == {"type": "json_object"}
         assert calls[0]["messages"][1]["content"] == "some post body"
         assert "coffee cup" in out
@@ -440,7 +440,7 @@ class TestExtractAIImagePrompt:
         out = await generator.extract_ai_image_prompt(voiced_text="x")
         # Fallback string is non-empty and contains brand-safe terms.
         assert out == generator._AI_IMAGE_PROMPT_FALLBACK
-        assert "near-black" in out
+        assert out.strip() != ""
 
     async def test_empty_prompt_returns_brand_fallback(self, monkeypatch):
         async def fake_chat(**kwargs):
