@@ -637,7 +637,8 @@ Target spec lives in **`DESIGN.md`** (the why + shape — read it first). This s
 
 ## Technical Debt
 
-(None yet.)
+- **List pagination — DONE 2026-06-23 (follow-up 2).** Count over-fetching was first fixed with `GET /posts/stats` + `GET /trends/stats` + multi-status `?status=a,b`. Then "Load more" paging was added (user chose explicit buttons over infinite scroll): `offset` param on `GET /posts` + `GET /trends`; **Published** and **Inbox** page in 30/50 at a time; the **Drafts board** shows ≤5 per column with "View all →" (draft/approved expand in place via `?view=`, scheduled→Calendar, published→Published). Scroll is now contained to each page's list/grid region (shell content column owns the scroll; page headers/filters stay fixed). Not a global framework — just offset + the two surfaces that grow. Cursor pagination remains unnecessary at this scale.
+- **HTTP endpoint test harness (added 2026-06-23).** API tests are currently pure-helper + lifecycle-guard unit tests; there's no AsyncClient/DB fixture, so the new stats/multi-status endpoints are covered only by import/route checks. If endpoint logic grows, stand up an httpx AsyncClient + test-DB fixture and backfill integration tests.
 
 ---
 

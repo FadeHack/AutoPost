@@ -88,12 +88,16 @@ function ago(iso: string, now: number): string {
   return `${months}mo ago`;
 }
 
+const PAGE = 30;
+
 function PublishedPage() {
   const router = useRouter();
   const { session, loading: authLoading } = useAuth();
 
   const [posts, setPosts] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [error, setError] = useState("");
   const [now] = useState(() => Date.now());
 
@@ -101,25 +105,34 @@ function PublishedPage() {
     if (!authLoading && !session) router.replace("/login");
   }, [authLoading, session, router]);
 
-  const fetchPosts = useCallback(async () => {
-    if (!session) return;
-    setLoading(true);
-    setError("");
-    try {
-      const data = await apiGet<Post[]>("/posts?status=published&limit=100");
-      setPosts(data);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.body : (e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [session]);
+  const load = useCallback(
+    async (offset: number) => {
+      if (!session) return;
+      if (offset === 0) setLoading(true);
+      else setLoadingMore(true);
+      setError("");
+      try {
+        const page = await apiGet<Post[]>(
+          `/posts?status=published&limit=${PAGE}&offset=${offset}`,
+        );
+        setPosts((prev) => (offset === 0 ? page : [...prev, ...page]));
+        setHasMore(page.length === PAGE);
+      } catch (e) {
+        setError(e instanceof ApiError ? e.body : (e as Error).message);
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [session],
+  );
 
   useEffect(() => {
-    fetchPosts();
-  }, [fetchPosts]);
+    load(0);
+  }, [load]);
 
-  // Most-recent first by published_at; fall back to created_at.
+  // Most-recent first by published_at within the loaded set (server pages by
+  // created_at desc; for published posts the two orders rarely diverge).
   const sorted = useMemo(
     () =>
       [...posts].sort(
@@ -135,86 +148,102 @@ function PublishedPage() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-5xl px-6 py-10">
-      <header className="mb-6">
-        <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
-          Published
-        </h1>
-        <p className="mt-2 text-sm text-ink-mid">
-          {loading
-            ? "Loading…"
-            : `What went live — ${sorted.length} post${sorted.length === 1 ? "" : "s"}, most recent first.`}
-        </p>
-      </header>
+    <main className="flex h-full flex-col">
+      {/* Fixed chrome. */}
+      <div className="mx-auto w-full max-w-5xl shrink-0 px-6 pt-10">
+        <header className="mb-6">
+          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+            Published
+          </h1>
+          <p className="mt-2 text-sm text-ink-mid">
+            What went live, most recent first.
+          </p>
+        </header>
 
-      {error && (
-        <Banner tone="error" className="mb-6">
-          {error}
-        </Banner>
-      )}
+        {error && (
+          <Banner tone="error" className="mb-6">
+            {error}
+          </Banner>
+        )}
 
-      {/* Column headers — the empty Performance slot is intentional (§5F). */}
-      <div className="mb-2 hidden grid-cols-[1fr_150px] gap-4 border-b border-border px-4 pb-2 text-xs font-medium uppercase tracking-wide text-ink-lo sm:grid">
-        <span>Post</span>
-        <span className="border-l border-border pl-4">Performance</span>
+        {/* Column headers — the empty Performance slot is intentional (§5F). */}
+        <div className="hidden grid-cols-[1fr_150px] gap-4 border-b border-border px-4 pb-2 text-xs font-medium uppercase tracking-wide text-ink-lo sm:grid">
+          <span>Post</span>
+          <span className="border-l border-border pl-4">Performance</span>
+        </div>
       </div>
 
-      <ul className="space-y-3">
-        {sorted.map((p) => (
-          <li
-            key={p.id}
-            className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-surface-1 p-4 sm:grid-cols-[1fr_150px]"
-          >
-            <div className="min-w-0">
-              <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-lo">
-                <CategoryChip category={p.category} />
-                {p.published_at && (
-                  <span>
-                    {new Date(p.published_at).toLocaleDateString([], {
-                      month: "short",
-                      day: "numeric",
-                      year: "numeric",
-                    })}{" "}
-                    · {ago(p.published_at, now)}
-                  </span>
-                )}
+      {/* Scrolling list — bounded to this region. */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-10">
+        <ul className="mx-auto mt-3 w-full max-w-5xl space-y-3">
+          {sorted.map((p) => (
+            <li
+              key={p.id}
+              className="grid grid-cols-1 gap-4 rounded-lg border border-border bg-surface-1 p-4 sm:grid-cols-[1fr_150px]"
+            >
+              <div className="min-w-0">
+                <div className="mb-2 flex flex-wrap items-center gap-2 text-xs text-ink-lo">
+                  <CategoryChip category={p.category} />
+                  {p.published_at && (
+                    <span>
+                      {new Date(p.published_at).toLocaleDateString([], {
+                        month: "short",
+                        day: "numeric",
+                        year: "numeric",
+                      })}{" "}
+                      · {ago(p.published_at, now)}
+                    </span>
+                  )}
+                </div>
+
+                <Link
+                  href={`/drafts/${p.id}`}
+                  className="block font-serif text-[15px] leading-snug text-ink-hi line-clamp-2 hover:underline"
+                >
+                  {p.hook}
+                </Link>
+
+                <div className="mt-3 flex flex-wrap gap-1.5">
+                  {p.targets.length === 0 ? (
+                    <LegacyLinkedInChip urn={p.linkedin_urn} />
+                  ) : (
+                    p.targets.map((t) => <TargetChip key={t.id} target={t} />)
+                  )}
+                </div>
               </div>
 
-              <Link
-                href={`/drafts/${p.id}`}
-                className="block font-serif text-[15px] leading-snug text-ink-hi line-clamp-2 hover:underline"
-              >
-                {p.hook}
+              {/* Reserved Performance cell — no fake charts (§5F). */}
+              <div className="hidden items-center border-l border-border pl-4 text-xs text-ink-lo sm:flex">
+                <span title="Analytics deferred until Member Data Portability lands">
+                  —
+                </span>
+              </div>
+            </li>
+          ))}
+          {!loading && sorted.length === 0 && (
+            <li className="rounded-lg border border-dashed border-border py-12 text-center text-sm text-ink-lo">
+              Nothing published yet. Approved drafts ship from the{" "}
+              <Link href="/scheduled" className="underline">
+                Calendar
               </Link>
+              .
+            </li>
+          )}
+        </ul>
 
-              {/* Fan-out outcomes. */}
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {p.targets.length === 0 ? (
-                  <LegacyLinkedInChip urn={p.linkedin_urn} />
-                ) : (
-                  p.targets.map((t) => <TargetChip key={t.id} target={t} />)
-                )}
-              </div>
-            </div>
-
-            {/* Reserved Performance cell — no fake charts (§5F). */}
-            <div className="hidden items-center border-l border-border pl-4 text-xs text-ink-lo sm:flex">
-              <span title="Analytics deferred until Member Data Portability lands">
-                —
-              </span>
-            </div>
-          </li>
-        ))}
-        {!loading && sorted.length === 0 && (
-          <li className="rounded-lg border border-dashed border-border py-12 text-center text-sm text-ink-lo">
-            Nothing published yet. Approved drafts ship from the{" "}
-            <Link href="/scheduled" className="underline">
-              Calendar
-            </Link>
-            .
-          </li>
+        {hasMore && (
+          <div className="mx-auto mt-4 w-full max-w-5xl">
+            <button
+              type="button"
+              onClick={() => load(posts.length)}
+              disabled={loadingMore}
+              className="w-full rounded-md border border-border px-4 py-2 text-sm font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
         )}
-      </ul>
+      </div>
     </main>
   );
 }

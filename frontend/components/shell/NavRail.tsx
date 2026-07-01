@@ -72,17 +72,21 @@ function useWorklistBadges() {
 
   useEffect(() => {
     let alive = true;
+    // Aggregate counts, not full rows: two tiny calls instead of pulling up to
+    // 300 PostRead/TrendRead rows (targets eager-loaded) on every shell mount.
     Promise.all([
-      apiGet<unknown[]>("/trends?status=unconsumed&limit=100").catch(() => []),
-      apiGet<unknown[]>("/posts?status=draft&limit=100").catch(() => []),
-      apiGet<unknown[]>("/posts?status=failed&limit=100").catch(() => []),
-    ]).then(([trends, drafts, failed]) => {
+      apiGet<{ unconsumed: number }>("/trends/stats").catch(() => ({
+        unconsumed: 0,
+      })),
+      apiGet<{ draft: number; failed: number }>("/posts/stats").catch(() => ({
+        draft: 0,
+        failed: 0,
+      })),
+    ]).then(([trends, posts]) => {
       if (!alive) return;
       setCounts({
-        inbox: Array.isArray(trends) ? trends.length : 0,
-        drafts:
-          (Array.isArray(drafts) ? drafts.length : 0) +
-          (Array.isArray(failed) ? failed.length : 0),
+        inbox: trends.unconsumed ?? 0,
+        drafts: (posts.draft ?? 0) + (posts.failed ?? 0),
       });
     });
     return () => {

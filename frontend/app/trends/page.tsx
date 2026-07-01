@@ -6,6 +6,7 @@ import { useAuth } from "@/components/auth-provider";
 import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
 import { Banner } from "@/components/ui/Banner";
 import { useToast } from "@/components/ui/Toast";
+import { CATEGORY_LABEL, GENERATABLE, type PostCategory } from "@/lib/domain";
 
 // Inbox — trend triage (DESIGN.md §5B). Trends are high-volume and disposable:
 // "skim, judge, act" is a list, not a gallery. Dense email-triage rows, filters
@@ -49,6 +50,8 @@ const SOURCE_LABEL: Record<TrendSource, string> = {
   reddit: "Reddit",
 };
 
+const TREND_PAGE = 50;
+
 const STATUS_OPTS: { id: StatusFilter; label: string }[] = [
   { id: "unconsumed", label: "Unconsumed" },
   { id: "consumed", label: "Consumed" },
@@ -79,10 +82,19 @@ function TrendsInbox() {
 
   const [trends, setTrends] = useState<Trend[]>([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("unconsumed");
   const [sourceFilter, setSourceFilter] = useState<TrendSource | "all">("all");
+  // The angle a per-row "Generate →" hands to the draft generator. Picked here
+  // so the trend AND its category are chosen together (the trend pins; this is
+  // the angle). Carried through the deep-link and pre-selected on /drafts.
+  const [genCategory, setGenCategory] =
+    useState<PostCategory>("founder_insight");
   const [error, setError] = useState("");
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [now] = useState(() => Date.now());
   const listRef = useRef<HTMLUListElement>(null);
@@ -91,26 +103,39 @@ function TrendsInbox() {
     if (!authLoading && !session) router.replace("/login");
   }, [authLoading, session, router]);
 
-  const fetchTrends = useCallback(async () => {
-    if (!session) return;
-    setLoading(true);
-    setError("");
-    try {
-      const params = new URLSearchParams({ status: statusFilter, limit: "100" });
-      if (sourceFilter !== "all") params.set("source", sourceFilter);
-      const data = await apiGet<Trend[]>(`/trends?${params.toString()}`);
-      setTrends(data);
-      setCursor(0);
-    } catch (e) {
-      setError(e instanceof ApiError ? e.body : (e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [session, statusFilter, sourceFilter]);
+  const load = useCallback(
+    async (offset: number) => {
+      if (!session) return;
+      if (offset === 0) setLoading(true);
+      else setLoadingMore(true);
+      setError("");
+      try {
+        const params = new URLSearchParams({
+          status: statusFilter,
+          limit: String(TREND_PAGE),
+          offset: String(offset),
+        });
+        if (sourceFilter !== "all") params.set("source", sourceFilter);
+        const data = await apiGet<Trend[]>(`/trends?${params.toString()}`);
+        setTrends((prev) => (offset === 0 ? data : [...prev, ...data]));
+        setHasMore(data.length === TREND_PAGE);
+        if (offset === 0) {
+          setCursor(0);
+          setSelected(new Set());
+        }
+      } catch (e) {
+        setError(e instanceof ApiError ? e.body : (e as Error).message);
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [session, statusFilter, sourceFilter],
+  );
 
   useEffect(() => {
-    fetchTrends();
-  }, [fetchTrends]);
+    load(0);
+  }, [load]);
 
   const refresh = async () => {
     setRefreshing(true);
@@ -122,7 +147,7 @@ function TrendsInbox() {
         title: `Pulled ${r.inserted} new`,
         body: `fetched ${r.fetched}, deduped ${r.deduped}`,
       });
-      await fetchTrends();
+      await load(0);
     } catch (e) {
       setError(e instanceof ApiError ? e.body : (e as Error).message);
     } finally {
@@ -165,6 +190,12 @@ function TrendsInbox() {
     setError("");
     const snapshot = trends;
     setTrends((prev) => prev.filter((t) => t.id !== trend.id));
+    setSelected((prev) => {
+      if (!prev.has(trend.id)) return prev;
+      const next = new Set(prev);
+      next.delete(trend.id);
+      return next;
+    });
     try {
       await apiDelete(`/trends/${trend.id}`);
     } catch (e) {
@@ -174,12 +205,70 @@ function TrendsInbox() {
   // intentionally only depends on `trends` snapshot
   }, [trends]);
 
+  const toggleSelect = useCallback((id: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }, []);
+
+  const toggleSelectAll = useCallback(() => {
+    setSelected((prev) =>
+      prev.size === trends.length ? new Set() : new Set(trends.map((t) => t.id)),
+    );
+  }, [trends]);
+
+  const bulkDelete = useCallback(async () => {
+    if (selected.size === 0) return;
+    if (!confirm(`Delete ${selected.size} selected trend(s)?`)) return;
+    setBulkDeleting(true);
+    setError("");
+    const ids = Array.from(selected);
+    const snapshot = trends;
+    const remaining = snapshot.filter((t) => !selected.has(t.id));
+    setTrends(remaining);
+    setSelected(new Set());
+    // If we're about to empty the visible page while the DB still has more, ask
+    // the delete call to hand back a refill page in the same round-trip.
+    const wantRefill = remaining.length === 0 && hasMore;
+    const params = new URLSearchParams({ status: statusFilter });
+    if (sourceFilter !== "all") params.set("source", sourceFilter);
+    if (wantRefill) params.set("refill", String(TREND_PAGE));
+    try {
+      const r = await apiPost<{ deleted: number; next: Trend[] }>(
+        `/trends/bulk-delete?${params.toString()}`,
+        { ids },
+      );
+      notify({
+        tone: "success",
+        title: `Deleted ${r.deleted} trend${r.deleted === 1 ? "" : "s"}`,
+      });
+      if (wantRefill) {
+        setTrends(r.next);
+        setHasMore(r.next.length === TREND_PAGE);
+        setCursor(0);
+      }
+    } catch (e) {
+      setTrends(snapshot);
+      setSelected(new Set(ids));
+      setError(e instanceof ApiError ? e.body : (e as Error).message);
+    } finally {
+      setBulkDeleting(false);
+    }
+  }, [selected, trends, hasMore, statusFilter, sourceFilter, notify]);
+
   const generateFrom = useCallback(
     (trend: Trend) => {
-      const qs = new URLSearchParams({ trend: trend.id, t: trend.title });
+      const qs = new URLSearchParams({
+        trend: trend.id,
+        t: trend.title,
+        category: genCategory,
+      });
       router.push(`/drafts?${qs.toString()}`);
     },
-    [router],
+    [router, genCategory],
   );
 
   // Keyboard triage. Ignored while focus is in a form control.
@@ -236,33 +325,39 @@ function TrendsInbox() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-6 py-10">
-      <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
-        <div>
-          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">Inbox</h1>
-          <p className="mt-2 text-sm text-ink-mid">
-            Fresh retrieval to triage. Skim, judge, hand straight into a draft.
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={refresh}
-          disabled={refreshing}
-          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:opacity-90 disabled:opacity-50"
-        >
-          {refreshing ? "Refreshing…" : "Refresh now"}
-        </button>
-      </header>
+    <main className="flex h-full flex-col">
+      {/* Fixed chrome. */}
+      <div className="shrink-0 px-6 pt-10">
+        <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
+          <div>
+            <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+              Inbox
+            </h1>
+            <p className="mt-2 text-sm text-ink-mid">
+              Fresh retrieval to triage. Skim, judge, hand straight into a draft.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={refresh}
+            disabled={refreshing}
+            className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:opacity-90 disabled:opacity-50"
+          >
+            {refreshing ? "Refreshing…" : "Refresh now"}
+          </button>
+        </header>
 
-      {error && (
-        <Banner tone="error" className="mb-6">
-          {error}
-        </Banner>
-      )}
+        {error && (
+          <Banner tone="error" className="mb-6">
+            {error}
+          </Banner>
+        )}
+      </div>
 
-      <div className="flex flex-col gap-6 md:grid md:grid-cols-[180px_1fr]">
-        {/* Left filter strip. */}
-        <aside className="flex flex-col gap-5">
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-10 md:overflow-hidden">
+        <div className="flex h-full flex-col gap-6 md:grid md:grid-cols-[180px_1fr]">
+          {/* Left filter strip. */}
+          <aside className="flex flex-col gap-5">
           <FilterGroup label="Status">
             {STATUS_OPTS.map((o) => (
               <FilterRow
@@ -290,6 +385,20 @@ function TrendsInbox() {
               </FilterRow>
             ))}
           </FilterGroup>
+          <FilterGroup label="Generate as">
+            <select
+              value={genCategory}
+              onChange={(e) => setGenCategory(e.target.value as PostCategory)}
+              className="w-full rounded-md border border-border bg-surface-2 px-2 py-1.5 text-sm text-ink-hi focus:border-ink-lo focus:outline-none"
+              title="The angle a per-row Generate → hands to the draft"
+            >
+              {GENERATABLE.map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY_LABEL[c]}
+                </option>
+              ))}
+            </select>
+          </FilterGroup>
           <p className="text-xs leading-relaxed text-ink-lo">
             <span className="font-medium text-ink-mid">Keys</span>
             <br />
@@ -301,16 +410,53 @@ function TrendsInbox() {
           </p>
         </aside>
 
-        {/* Triage list. */}
-        <section className="min-w-0">
-          <p className="mb-2 text-xs text-ink-lo">
-            {loading
-              ? "Loading…"
-              : `${counts.total} item${counts.total === 1 ? "" : "s"}`}
-          </p>
+        {/* Triage list — scrolls in its own container. */}
+        <section className="flex min-h-0 min-w-0 flex-col">
+          <div className="mb-2 flex shrink-0 items-center justify-between gap-3">
+            {trends.length > 0 ? (
+              <label className="flex cursor-pointer items-center gap-2 text-xs text-ink-mid hover:text-ink-hi">
+                <input
+                  type="checkbox"
+                  className="h-3.5 w-3.5 accent-accent"
+                  checked={selected.size === trends.length && trends.length > 0}
+                  ref={(el) => {
+                    if (el)
+                      el.indeterminate =
+                        selected.size > 0 && selected.size < trends.length;
+                  }}
+                  onChange={toggleSelectAll}
+                />
+                {selected.size > 0
+                  ? `${selected.size} of ${trends.length} selected`
+                  : "Select all"}
+              </label>
+            ) : (
+              <p className="text-xs text-ink-lo">
+                {loading
+                  ? "Loading…"
+                  : `${counts.total} item${counts.total === 1 ? "" : "s"}${hasMore ? "+" : ""}`}
+              </p>
+            )}
+            {selected.size > 0 ? (
+              <button
+                type="button"
+                onClick={bulkDelete}
+                disabled={bulkDeleting}
+                className="rounded-md border border-status-failed/50 px-2.5 py-1 text-xs font-medium text-status-failed hover:bg-status-failed/10 disabled:opacity-50"
+              >
+                {bulkDeleting ? "Deleting…" : `Delete ${selected.size} selected`}
+              </button>
+            ) : (
+              trends.length > 0 && (
+                <p className="text-xs text-ink-lo">
+                  {`${counts.total} item${counts.total === 1 ? "" : "s"}${hasMore ? "+" : ""}`}
+                </p>
+              )
+            )}
+          </div>
           <ul
             ref={listRef}
-            className="divide-y divide-border overflow-hidden rounded-lg border border-border"
+            className="min-h-0 flex-1 divide-y divide-border overflow-y-auto rounded-lg border border-border"
           >
             {trends.map((t, i) => {
               const active = i === cursor;
@@ -324,6 +470,14 @@ function TrendsInbox() {
                     (active ? "bg-surface-2" : "bg-surface-1 hover:bg-surface-2")
                   }
                 >
+                  <input
+                    type="checkbox"
+                    className="mt-1 h-3.5 w-3.5 shrink-0 accent-accent"
+                    checked={selected.has(t.id)}
+                    onChange={() => toggleSelect(t.id)}
+                    onClick={(e) => e.stopPropagation()}
+                    aria-label={`Select trend ${t.title}`}
+                  />
                   <span
                     className={
                       "mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full " +
@@ -387,8 +541,21 @@ function TrendsInbox() {
                 pull fresh items.
               </li>
             )}
+            {hasMore && (
+              <li className="p-2">
+                <button
+                  type="button"
+                  onClick={() => load(trends.length)}
+                  disabled={loadingMore}
+                  className="w-full rounded-md border border-border px-4 py-2 text-sm font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi disabled:opacity-50"
+                >
+                  {loadingMore ? "Loading…" : "Load more"}
+                </button>
+              </li>
+            )}
           </ul>
         </section>
+        </div>
       </div>
     </main>
   );

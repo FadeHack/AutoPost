@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
 } from "react";
@@ -153,6 +154,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [approving, setApproving] = useState(false);
   const [scheduling, setScheduling] = useState(false);
   const [schedulePickerOpen, setSchedulePickerOpen] = useState(false);
+  const schedulePickerRef = useRef<HTMLDivElement>(null);
   const [publishing, setPublishing] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [reversing, setReversing] = useState(false);
@@ -172,6 +174,18 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
   useEffect(() => {
     if (!authLoading && !session) router.replace("/login");
   }, [authLoading, session, router]);
+
+  // The schedule picker opens above the sticky ActionBar, so without this it
+  // can land off-screen and the Schedule click looks like a no-op. Bring it
+  // into view when it opens.
+  useEffect(() => {
+    if (schedulePickerOpen) {
+      schedulePickerRef.current?.scrollIntoView({
+        behavior: "smooth",
+        block: "center",
+      });
+    }
+  }, [schedulePickerOpen]);
 
   useEffect(() => {
     if (!session || !id) return;
@@ -958,7 +972,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
           </div>
 
           {schedulePickerOpen && (
-            <div className="border-t border-border p-5">
+            <div ref={schedulePickerRef} className="border-t border-border p-5">
               <SchedulePicker
                 initialScheduledAt={post.scheduled_at}
                 scheduling={scheduling}

@@ -20,7 +20,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field, computed_field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -115,16 +115,73 @@ async def generate(
 
 @router.get("", response_model=list[PostRead])
 async def list_posts(
-    post_status: PostStatus | None = Query(None, alias="status"),
+    status: str | None = Query(
+        None,
+        description="One status or a comma list (e.g. 'scheduled,publishing'). "
+        "Lets the board/calendar fetch only the statuses they render instead of "
+        "pulling everything and filtering client-side.",
+    ),
     limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, description="Skip N rows — drives 'Load more'."),
     session: AsyncSession = Depends(get_session),
     _: User = Depends(get_current_user),
 ) -> list[PostRead]:
-    stmt = select(Post).order_by(Post.created_at.desc()).limit(limit)
-    if post_status is not None:
-        stmt = stmt.where(Post.status == post_status)
+    stmt = (
+        select(Post).order_by(Post.created_at.desc()).limit(limit).offset(offset)
+    )
+    if status:
+        try:
+            wanted = [PostStatus(s) for s in status.split(",") if s]
+        except ValueError as exc:
+            # `status` (the query param) shadows the fastapi status module here,
+            # so use the literal 400.
+            raise HTTPException(
+                status_code=400, detail=f"invalid status filter: {exc}"
+            ) from exc
+        stmt = stmt.where(Post.status.in_(wanted))
     rows = (await session.execute(stmt)).scalars().all()
     return [PostRead.model_validate(r) for r in rows]
+
+
+class PostStats(BaseModel):
+    """Counts by status for the funnel/badges — so Today and the NavRail can
+    render numbers without shipping hundreds of full PostRead rows just to
+    `.length` them client-side. `published_7d` powers Today's recent-activity
+    counter (status counts are all-time)."""
+
+    draft: int = 0
+    approved: int = 0
+    scheduled: int = 0
+    publishing: int = 0
+    published: int = 0
+    failed: int = 0
+    published_7d: int = 0
+
+
+@router.get("/stats", response_model=PostStats)
+async def post_stats(
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> PostStats:
+    """Aggregate counts (one GROUP BY + one filtered count) — cheap on the DB,
+    replaces the 5–7 full-list fetches the dashboard used to do for counts."""
+    rows = (
+        await session.execute(
+            select(Post.status, func.count()).group_by(Post.status)
+        )
+    ).all()
+    counts = {st.value: n for st, n in rows}
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    published_7d = (
+        await session.execute(
+            select(func.count())
+            .select_from(Post)
+            .where(Post.status == PostStatus.published, Post.published_at >= cutoff)
+        )
+    ).scalar_one()
+
+    return PostStats(**counts, published_7d=published_7d)
 
 
 @router.get("/{post_id}", response_model=PostRead)

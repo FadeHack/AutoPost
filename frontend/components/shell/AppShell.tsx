@@ -41,7 +41,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   return (
     <ToastProvider>
-      <div className="flex min-h-screen">
+      <div className="flex h-screen overflow-hidden">
         <aside
         className={
           "sticky top-0 hidden h-screen shrink-0 flex-col border-r border-border bg-surface-1/40 px-2.5 py-3 md:flex " +
@@ -86,8 +86,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
         </div>
       </aside>
 
-        {/* Pages own their own <main>; this is just the content column. */}
-        <div className="min-w-0 flex-1 pb-20 md:pb-0">{children}</div>
+        {/* The single scroll container. Simple pages scroll here; board/list
+            pages fill the height (h-full) and scroll their own inner regions so
+            their headers stay put instead of scrolling the whole page. */}
+        <div className="min-w-0 flex-1 overflow-y-auto pb-20 md:pb-0">
+          {children}
+        </div>
 
         <MobileTabBar />
       </div>

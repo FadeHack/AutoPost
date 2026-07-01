@@ -557,13 +557,15 @@ async def compress_for_bluesky(
 ) -> str:
     """Rewrite a LinkedIn-shaped post for Bluesky's 300-char cap.
 
-    FAST model + tight system prompt. Falls back to a brand-safe one-liner
-    when the rewrite is empty or still over the cap — better to ship a
-    publishable Bluesky post than a 1641-char one that fails at publish.
+    Primary 70B + tight system prompt — same reasoning as run_platform_rewrite:
+    the 8B fast model overshoots the hard 300-char cap. Falls back to a
+    brand-safe one-liner when the rewrite is empty or still over the cap —
+    better to ship a publishable Bluesky post than a 1641-char one that fails
+    at publish.
     """
     raw = await groq_client.chat(
         stage="bluesky_compress",
-        model=settings.GROQ_MODEL_FAST,
+        model=settings.GROQ_MODEL_PRIMARY,
         prompt_id=prompt_id,
         messages=[
             {"role": "system", "content": _BLUESKY_COMPRESS_SYSTEM},
@@ -643,7 +645,11 @@ async def run_platform_rewrite(
     a mangled post (project philosophy, see [[project_per_platform_generation_strategy]])."""
     raw = await groq_client.chat(
         stage=f"voice_{prompt.platform.value if prompt.platform else 'any'}",
-        model=settings.GROQ_MODEL_FAST,
+        # Primary 70B, not the 8B fast model: the per-platform rewrite has to
+        # honor a hard char budget (Bluesky ≤300) and the 8B reliably overshoots
+        # (e.g. 407 on a 300 cap). The 70B follows the length constraint, and a
+        # one-shot rewrite is cheap enough to not need the fast tier.
+        model=settings.GROQ_MODEL_PRIMARY,
         prompt_id=prompt_id or prompt.id,
         messages=[
             {"role": "system", "content": prompt.body},

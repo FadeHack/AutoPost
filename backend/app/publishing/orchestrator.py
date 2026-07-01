@@ -154,8 +154,36 @@ async def _maybe_aggregate_post_status(
 ) -> None:
     """When every PostTarget settles, roll posts.status up to published or
     failed. While any target is still pending/publishing, posts.status stays
-    at `scheduled` (or whatever pre-publish state it's in)."""
-    stmt = select(PostTarget).where(PostTarget.post_id == post.id)
+    at `scheduled` (or whatever pre-publish state it's in).
+
+    Concurrency: each target publishes in its OWN session/transaction (one
+    scheduler job per target). Two hazards follow, both handled here:
+
+    1. Stale siblings. `Post.targets` is `lazy='selectin'`, so this job already
+       loaded every sibling target when it fetched the Post — at which point
+       they were still `pending`/`publishing`. A plain re-query returns those
+       identity-mapped rows WITHOUT refreshing, so we'd read a stale status and
+       skip the roll-up. `populate_existing=True` forces a fresh read of the
+       committed DB state.
+    2. Lost update. If two target jobs aggregate at the same instant, each can
+       miss the other and nobody rolls the post up. We `SELECT ... FOR UPDATE`
+       the post row to serialize the aggregators — the last one to commit its
+       own target then necessarily sees every sibling terminal."""
+    locked = (
+        await session.execute(
+            select(Post)
+            .where(Post.id == post.id)
+            .with_for_update()
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one_or_none()
+    if locked is None:
+        return
+    stmt = (
+        select(PostTarget)
+        .where(PostTarget.post_id == post.id)
+        .execution_options(populate_existing=True)
+    )
     targets = list((await session.execute(stmt)).scalars().all())
     if not targets:
         return

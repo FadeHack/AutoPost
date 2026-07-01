@@ -12,7 +12,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -55,6 +55,9 @@ class BulkDeleteRequest(BaseModel):
 
 class BulkDeleteResponse(BaseModel):
     deleted: int
+    # Refill page for the active filter, returned in the same round-trip so the
+    # client never has to fire a second GET /trends after a bulk delete.
+    next: list[TrendRead] = Field(default_factory=list)
 
 
 @router.post("/refresh", response_model=RefreshResponse)
@@ -63,15 +66,16 @@ async def refresh(_: User = Depends(get_current_user)) -> RefreshResponse:
     return RefreshResponse(**summary)
 
 
-@router.get("", response_model=list[TrendRead])
-async def list_trends(
-    status: Literal["unconsumed", "consumed", "all"] = Query("unconsumed"),
-    source: TrendSource | None = Query(None),
-    limit: int = Query(50, ge=1, le=200),
-    session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+async def _query_trends(
+    session: AsyncSession,
+    status: Literal["unconsumed", "consumed", "all"],
+    source: TrendSource | None,
+    limit: int,
+    offset: int,
 ) -> list[TrendRead]:
-    stmt = select(Trend).order_by(Trend.fetched_at.desc()).limit(limit)
+    stmt = (
+        select(Trend).order_by(Trend.fetched_at.desc()).limit(limit).offset(offset)
+    )
     if status == "unconsumed":
         stmt = stmt.where(Trend.consumed_at.is_(None))
     elif status == "consumed":
@@ -80,6 +84,44 @@ async def list_trends(
         stmt = stmt.where(Trend.source == source)
     result = await session.execute(stmt)
     return [TrendRead.model_validate(r) for r in result.scalars().all()]
+
+
+@router.get("", response_model=list[TrendRead])
+async def list_trends(
+    status: Literal["unconsumed", "consumed", "all"] = Query("unconsumed"),
+    source: TrendSource | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0, description="Skip N rows — drives 'Load more'."),
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> list[TrendRead]:
+    return await _query_trends(session, status, source, limit, offset)
+
+
+class TrendStats(BaseModel):
+    """Unconsumed/total counts for the Inbox badge + Today's counter — so the
+    NavRail and Today stop pulling up to 100 full trend rows just to count them."""
+
+    unconsumed: int = 0
+    total: int = 0
+
+
+@router.get("/stats", response_model=TrendStats)
+async def trend_stats(
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> TrendStats:
+    total = (
+        await session.execute(select(func.count()).select_from(Trend))
+    ).scalar_one()
+    unconsumed = (
+        await session.execute(
+            select(func.count())
+            .select_from(Trend)
+            .where(Trend.consumed_at.is_(None))
+        )
+    ).scalar_one()
+    return TrendStats(unconsumed=unconsumed, total=total)
 
 
 @router.patch("/{trend_id}", response_model=TrendRead)
@@ -119,6 +161,9 @@ async def delete_trend(
 @router.post("/bulk-delete", response_model=BulkDeleteResponse)
 async def bulk_delete_trends(
     body: BulkDeleteRequest,
+    status: Literal["unconsumed", "consumed", "all"] = Query("unconsumed"),
+    source: TrendSource | None = Query(None),
+    refill: int = Query(0, ge=0, le=200, description="Rows of the active filter to return post-delete."),
     session: AsyncSession = Depends(get_session),
     _: User = Depends(get_current_user),
 ) -> BulkDeleteResponse:
@@ -126,4 +171,9 @@ async def bulk_delete_trends(
         delete(Trend).where(Trend.id.in_(body.ids))
     )
     await session.commit()
-    return BulkDeleteResponse(deleted=result.rowcount or 0)
+    # Fold the post-delete refill into this same round-trip so the client
+    # doesn't have to fire a separate GET /trends.
+    next_page = (
+        await _query_trends(session, status, source, refill, 0) if refill else []
+    )
+    return BulkDeleteResponse(deleted=result.rowcount or 0, next=next_page)

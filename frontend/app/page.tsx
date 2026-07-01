@@ -35,12 +35,29 @@ type Post = {
   created_at: string;
 };
 
-const TREND_LIMIT = 50;
-const POST_LIMIT = 100;
+// Aggregate counts (GET /posts/stats) — so the funnel/counters render numbers
+// without pulling a full row set per status. `published_7d` is the recent slice.
+type PostStats = {
+  draft: number;
+  approved: number;
+  scheduled: number;
+  publishing: number;
+  published: number;
+  failed: number;
+  published_7d: number;
+};
+const ZERO_STATS: PostStats = {
+  draft: 0,
+  approved: 0,
+  scheduled: 0,
+  publishing: 0,
+  published: 0,
+  failed: 0,
+  published_7d: 0,
+};
 
-function cap(n: number, limit: number): string {
-  return n >= limit ? `${limit}+` : `${n}`;
-}
+const PEEK_LIMIT = 5; // fresh-trends preview rows
+const NEXTUP_LIMIT = 50; // bounded scheduled fetch, only to find the soonest slot
 
 function relativeFromNow(iso: string, now: number): string {
   const diff = new Date(iso).getTime() - now;
@@ -66,11 +83,9 @@ function Today() {
 
   const [expiresAt, setExpiresAt] = useState<string | null>(null);
   const [trends, setTrends] = useState<Trend[]>([]);
-  const [draft, setDraft] = useState<Post[]>([]);
-  const [approved, setApproved] = useState<Post[]>([]);
+  const [trendCount, setTrendCount] = useState(0);
+  const [stats, setStats] = useState<PostStats>(ZERO_STATS);
   const [scheduled, setScheduled] = useState<Post[]>([]);
-  const [published, setPublished] = useState<Post[]>([]);
-  const [failed, setFailed] = useState<Post[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [connecting, setConnecting] = useState(false);
@@ -92,27 +107,29 @@ function Today() {
     if (!session) return;
     setLoading(true);
     setError("");
+    // Counts come from aggregates, not full row sets. The only rows pulled are
+    // the 5-item trends peek + a bounded scheduled list (to find the next slot).
     Promise.all([
       apiGet<LinkedInStatus>("/auth/linkedin/status").catch(() => ({
         expires_at: null,
       })),
-      apiGet<Trend[]>(`/trends?status=unconsumed&limit=${TREND_LIMIT}`).catch(
+      apiGet<PostStats>("/posts/stats").catch(() => ZERO_STATS),
+      apiGet<{ unconsumed: number }>("/trends/stats").catch(() => ({
+        unconsumed: 0,
+      })),
+      apiGet<Trend[]>(`/trends?status=unconsumed&limit=${PEEK_LIMIT}`).catch(
         () => [],
       ),
-      apiGet<Post[]>(`/posts?status=draft&limit=${POST_LIMIT}`).catch(() => []),
-      apiGet<Post[]>(`/posts?status=approved&limit=${POST_LIMIT}`).catch(() => []),
-      apiGet<Post[]>(`/posts?status=scheduled&limit=${POST_LIMIT}`).catch(() => []),
-      apiGet<Post[]>(`/posts?status=published&limit=${POST_LIMIT}`).catch(() => []),
-      apiGet<Post[]>(`/posts?status=failed&limit=${POST_LIMIT}`).catch(() => []),
+      apiGet<Post[]>(`/posts?status=scheduled&limit=${NEXTUP_LIMIT}`).catch(
+        () => [],
+      ),
     ])
-      .then(([li, tr, d, a, s, p, f]) => {
+      .then(([li, st, tc, tr, s]) => {
         setExpiresAt(li.expires_at);
+        setStats(st);
+        setTrendCount(tc.unconsumed);
         setTrends(tr);
-        setDraft(d);
-        setApproved(a);
         setScheduled(s);
-        setPublished(p);
-        setFailed(f);
       })
       .catch((e) =>
         setError(e instanceof ApiError ? e.body : (e as Error).message),
@@ -146,19 +163,14 @@ function Today() {
         new Date(a.scheduled_at!).getTime() - new Date(b.scheduled_at!).getTime(),
     )[0];
 
-  const weekAgo = now - 7 * 86_400_000;
-  const published7d = published.filter(
-    (p) => p.published_at && new Date(p.published_at).getTime() >= weekAgo,
-  ).length;
-
-  const needsReview = draft.length + failed.length;
+  const needsReview = stats.draft + stats.failed;
 
   const funnel = [
-    { label: "Inbox", count: cap(trends.length, TREND_LIMIT), href: "/trends" },
-    { label: "Draft", count: cap(draft.length, POST_LIMIT), href: "/drafts" },
-    { label: "Approved", count: cap(approved.length, POST_LIMIT), href: "/drafts" },
-    { label: "Scheduled", count: cap(scheduled.length, POST_LIMIT), href: "/scheduled" },
-    { label: "Live", count: cap(published.length, POST_LIMIT), href: "/published" },
+    { label: "Inbox", count: trendCount, href: "/trends" },
+    { label: "Draft", count: stats.draft, href: "/drafts" },
+    { label: "Approved", count: stats.approved, href: "/drafts" },
+    { label: "Scheduled", count: stats.scheduled, href: "/scheduled" },
+    { label: "Live", count: stats.published, href: "/published" },
   ];
 
   const dateLabel = new Date(now).toLocaleDateString(undefined, {
@@ -230,18 +242,18 @@ function Today() {
         <Counter
           href="/drafts"
           label="Needs review"
-          value={loading ? "—" : cap(needsReview, POST_LIMIT * 2)}
+          value={loading ? "—" : `${needsReview}`}
           sub={
-            failed.length > 0
-              ? `${draft.length} draft${draft.length === 1 ? "" : "s"} · ${failed.length} failed`
+            stats.failed > 0
+              ? `${stats.draft} draft${stats.draft === 1 ? "" : "s"} · ${stats.failed} failed`
               : "drafts awaiting review"
           }
-          alert={failed.length > 0}
+          alert={stats.failed > 0}
         />
         <Counter
           href="/scheduled"
           label="Scheduled"
-          value={loading ? "—" : cap(scheduled.length, POST_LIMIT)}
+          value={loading ? "—" : `${stats.scheduled}`}
           sub={
             nextScheduled?.scheduled_at
               ? `next ${relativeFromNow(nextScheduled.scheduled_at, now)}`
@@ -251,7 +263,7 @@ function Today() {
         <Counter
           href="/published"
           label="Published"
-          value={loading ? "—" : `${published7d}`}
+          value={loading ? "—" : `${stats.published_7d}`}
           sub="last 7 days"
         />
       </section>

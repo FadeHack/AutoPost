@@ -114,12 +114,12 @@ function CalendarPage() {
     setLoading(true);
     setError("");
     try {
-      const data = await apiGet<Post[]>("/posts?limit=200");
-      setPosts(
-        data.filter(
-          (p) => p.status === "scheduled" || p.status === "publishing",
-        ),
+      // Multi-status server filter — only the slots the calendar renders, so a
+      // growing published history can't crowd them out of the row budget.
+      const data = await apiGet<Post[]>(
+        "/posts?status=scheduled,publishing&limit=200",
       );
+      setPosts(data);
     } catch (e) {
       setError(e instanceof ApiError ? e.body : (e as Error).message);
     } finally {
@@ -218,7 +218,8 @@ function CalendarPage() {
     setAnchor((a) => (view === "month" ? addMonths(a, dir) : addDays(a, dir * 7)));
 
   return (
-    <main className="mx-auto w-full max-w-6xl px-6 py-10">
+    <main className="flex h-full flex-col">
+      <div className="shrink-0 px-6 pt-10">
       <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
           <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
@@ -279,7 +280,9 @@ function CalendarPage() {
           {error}
         </Banner>
       )}
+      </div>
 
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-10">
       <div className="flex flex-col gap-6 md:grid md:grid-cols-[1fr_280px]">
         {/* Grid — hidden on mobile (agenda takes over). */}
         <section className="hidden md:block">
@@ -404,6 +407,7 @@ function CalendarPage() {
             )}
           </div>
         </aside>
+        </div>
       </div>
     </main>
   );

@@ -14,8 +14,9 @@
  *
  * Not pixel-perfect by design. The signal is: line breaks render, hashtags
  * read right, the image/carousel hangs where the real one will, and the
- * operator sees a char-budget problem BEFORE approving. The long-term fix for
- * over-cap bodies is per-platform generation (Phase 12), not truncation.
+ * operator sees a char-budget problem BEFORE approving. Over-cap is never
+ * truncated — the fix is regenerating (or tightening the platform's rewrite
+ * prompt) so the variant comes back within budget.
  */
 
 import { useState } from "react";
@@ -225,10 +226,21 @@ export default function PlatformPreview({
       {overCap && (
         <Banner tone="warn">
           This {PLATFORM_LABEL[activePlatform]} variant is over its {cap}-char
-          cap and will fail the publish gate. The fix is per-platform
-          generation (Phase 12), not truncation.
-          {activeTarget.commentary === null && activePlatform !== "linkedin" && (
-            <> This target currently falls back to the LinkedIn-shaped body.</>
+          cap and will fail the publish gate.
+          {activeTarget.commentary === null && activePlatform !== "linkedin" ? (
+            <>
+              {" "}
+              No per-platform rewrite is attached, so it&apos;s falling back to
+              the LinkedIn-shaped body. Regenerate this draft to get a real{" "}
+              {PLATFORM_LABEL[activePlatform]} variant.
+            </>
+          ) : (
+            <>
+              {" "}
+              The per-platform rewrite came back over budget. Regenerate to roll
+              a shorter variant, or tighten the {PLATFORM_LABEL[activePlatform]}{" "}
+              rewrite prompt — we never truncate.
+            </>
           )}
         </Banner>
       )}

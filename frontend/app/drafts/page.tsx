@@ -1,6 +1,6 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
@@ -20,13 +20,15 @@ import {
   type PostStatus,
 } from "@/lib/domain";
 
-// Drafts — pipeline board (DESIGN.md §5D). The status enum rendered spatially:
-// four columns mapping 1:1 to the lifecycle, read left-to-right as a funnel.
-// Replaces the old flat status-filtered list. Today's "Generate a draft" CTA
-// lands here, so the generate affordance stays on the board (top strip).
+// Drafts — pipeline board (DESIGN.md §5D). The lifecycle rendered spatially.
+// Overview = four columns, each a *recent slice* (≤5) with a count + "View all →"
+// so the board stays an at-a-glance funnel, not an exhaustive dump. `?view=<status>`
+// switches to a full single-status list with "Load more" paging. Every scroll
+// region is bounded to its own container — the page chrome never scrolls.
 
-// Currently-implemented publishers. Threads + Instagram are Meta-gated — only
-// shown when the backend reports them enabled (PLATFORM_{THREADS,INSTAGRAM}_ENABLED).
+const OVERVIEW_PER_COL = 5;
+const LIST_PAGE = 30;
+
 type GenPlatform = Platform;
 
 const GEN_PLATFORMS: { id: GenPlatform; label: string }[] = [
@@ -34,21 +36,10 @@ const GEN_PLATFORMS: { id: GenPlatform; label: string }[] = [
   { id: "bluesky", label: "Bluesky" },
   { id: "mastodon", label: "Mastodon" },
 ];
+const THREADS_PLATFORM = { id: "threads" as GenPlatform, label: "Threads" };
+const INSTAGRAM_PLATFORM = { id: "instagram" as GenPlatform, label: "Instagram" };
 
-const THREADS_PLATFORM: { id: GenPlatform; label: string } = {
-  id: "threads",
-  label: "Threads",
-};
-const INSTAGRAM_PLATFORM: { id: GenPlatform; label: string } = {
-  id: "instagram",
-  label: "Instagram",
-};
-
-type PostTarget = {
-  id: string;
-  platform: Platform;
-  status: string;
-};
+type PostTarget = { id: string; platform: Platform; status: string };
 
 type Post = {
   id: string;
@@ -67,39 +58,98 @@ type Post = {
   targets: PostTarget[];
 };
 
-// The board's columns. Each maps to one or two lifecycle states so every status
-// is visible across exactly four columns (DESIGN.md §5D). `publishing` rides in
-// the Scheduled column (it's in-flight from a schedule); `failed` rides in the
-// Published column rendered red with a retry affordance (it's a terminal outcome
-// of the publish attempt).
-const COLUMNS: { id: string; label: string; statuses: PostStatus[] }[] = [
-  { id: "draft", label: "Draft", statuses: ["draft"] },
-  { id: "approved", label: "Approved", statuses: ["approved"] },
-  { id: "scheduled", label: "Scheduled", statuses: ["scheduled", "publishing"] },
-  { id: "published", label: "Published", statuses: ["published", "failed"] },
+type PostStats = {
+  draft: number;
+  approved: number;
+  scheduled: number;
+  publishing: number;
+  published: number;
+  failed: number;
+};
+const ZERO_STATS: PostStats = {
+  draft: 0,
+  approved: 0,
+  scheduled: 0,
+  publishing: 0,
+  published: 0,
+  failed: 0,
+};
+
+// Each board column maps to one or two lifecycle states (publishing rides with
+// Scheduled, failed rides with Published). `viewAll` points at the fullest
+// surface for that bucket: draft/approved have no dedicated page so they expand
+// in place via ?view; scheduled → Calendar, published → Published.
+type Column = {
+  id: string;
+  label: string;
+  query: string;
+  viewAll: string;
+  count: (s: PostStats) => number;
+};
+const COLUMNS: Column[] = [
+  {
+    id: "draft",
+    label: "Draft",
+    query: "draft",
+    viewAll: "/drafts?view=draft",
+    count: (s) => s.draft,
+  },
+  {
+    id: "approved",
+    label: "Approved",
+    query: "approved",
+    viewAll: "/drafts?view=approved",
+    count: (s) => s.approved,
+  },
+  {
+    id: "scheduled",
+    label: "Scheduled",
+    query: "scheduled,publishing",
+    viewAll: "/scheduled",
+    count: (s) => s.scheduled + s.publishing,
+  },
+  {
+    id: "published",
+    label: "Published",
+    query: "published,failed",
+    viewAll: "/published",
+    count: (s) => s.published + s.failed,
+  },
 ];
 
-function DraftsBoard() {
+const violationsOf = (p: Post) =>
+  scanVoiceTells(`${p.hook}\n\n${p.body}`).count;
+
+// ---------------------------------------------------------------------------
+
+function BoardOverview() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const { session, loading: authLoading } = useAuth();
   const { notify } = useToast();
 
-  // A trend handed in from the Inbox (DESIGN.md §5B "Generate →"). Pins the
-  // generation to this trend's content; the operator still picks category +
-  // platforms here, then lands in the new draft's cockpit.
   const pinnedTrendId = searchParams.get("trend");
   const pinnedTrendTitle = searchParams.get("t");
+  // Category carried from the trends inbox deep-link (the angle chosen when the
+  // trend was picked). Only honor it if it's a real generatable category.
+  const pinnedCategoryParam = searchParams.get("category");
+  const pinnedCategory = GENERATABLE.includes(
+    pinnedCategoryParam as PostCategory,
+  )
+    ? (pinnedCategoryParam as PostCategory)
+    : null;
 
-  const [posts, setPosts] = useState<Post[]>([]);
+  const [stats, setStats] = useState<PostStats>(ZERO_STATS);
+  const [cols, setCols] = useState<Record<string, Post[]>>({});
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
   const [generating, setGenerating] = useState(false);
-  const [genCategory, setGenCategory] = useState<PostCategory>("founder_insight");
+  const [genCategory, setGenCategory] = useState<PostCategory>(
+    pinnedCategory ?? "founder_insight",
+  );
   const [genPlatforms, setGenPlatforms] = useState<GenPlatform[]>(["linkedin"]);
   const [threadsEnabled, setThreadsEnabled] = useState(false);
   const [instagramEnabled, setInstagramEnabled] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
-  const [error, setError] = useState("");
 
   const platformOptions = [
     ...GEN_PLATFORMS,
@@ -108,66 +158,56 @@ function DraftsBoard() {
   ];
 
   useEffect(() => {
-    if (!authLoading && !session) router.replace("/login");
-  }, [authLoading, session, router]);
-
-  useEffect(() => {
-    if (!session) return;
     apiGet<{ enabled: boolean }>("/auth/threads/status")
       .then((s) => setThreadsEnabled(!!s.enabled))
       .catch(() => setThreadsEnabled(false));
     apiGet<{ enabled: boolean }>("/auth/instagram/status")
       .then((s) => setInstagramEnabled(!!s.enabled))
       .catch(() => setInstagramEnabled(false));
-  }, [session]);
+  }, []);
 
-  const fetchPosts = useCallback(async () => {
-    if (!session) return;
+  const fetchOverview = useCallback(async () => {
     setLoading(true);
     setError("");
     try {
-      const data = await apiGet<Post[]>("/posts?limit=200");
-      setPosts(data);
+      const [st, ...lists] = await Promise.all([
+        apiGet<PostStats>("/posts/stats"),
+        ...COLUMNS.map((c) =>
+          apiGet<Post[]>(
+            `/posts?status=${c.query}&limit=${OVERVIEW_PER_COL}`,
+          ).catch(() => [] as Post[]),
+        ),
+      ]);
+      setStats(st);
+      const next: Record<string, Post[]> = {};
+      COLUMNS.forEach((c, i) => (next[c.id] = lists[i]));
+      setCols(next);
     } catch (e) {
       setError(e instanceof ApiError ? e.body : (e as Error).message);
     } finally {
       setLoading(false);
     }
-  }, [session]);
+  }, []);
 
   useEffect(() => {
-    fetchPosts();
-  }, [fetchPosts]);
-
-  // Bucket once per posts change; voice violations computed here so cards stay
-  // presentational. Within a column, newest first.
-  const buckets = useMemo(() => {
-    const withVoice = posts.map((p) => ({
-      post: p,
-      violations: scanVoiceTells(`${p.hook}\n\n${p.body}`).count,
-    }));
-    return COLUMNS.map((col) => ({
-      ...col,
-      items: withVoice
-        .filter((x) => col.statuses.includes(x.post.status))
-        .sort(
-          (a, b) =>
-            new Date(b.post.created_at).getTime() -
-            new Date(a.post.created_at).getTime(),
-        ),
-    }));
-  }, [posts]);
+    fetchOverview();
+  }, [fetchOverview]);
 
   const deletePost = async (p: Post) => {
     if (!confirm(`Delete draft "${p.hook.slice(0, 60)}"?`)) return;
-    setError("");
-    const snapshot = posts;
-    setPosts((prev) => prev.filter((x) => x.id !== p.id));
+    const snapshot = cols;
+    setCols((prev) => {
+      const next: Record<string, Post[]> = {};
+      for (const k of Object.keys(prev))
+        next[k] = prev[k].filter((x) => x.id !== p.id);
+      return next;
+    });
     try {
       await apiDelete(`/posts/${p.id}`);
       notify({ tone: "success", title: "Draft deleted" });
+      setStats((s) => ({ ...s, [p.status]: Math.max(0, s[p.status] - 1) }));
     } catch (err) {
-      setPosts(snapshot);
+      setCols(snapshot);
       setError(err instanceof ApiError ? err.body : (err as Error).message);
     }
   };
@@ -177,7 +217,12 @@ function DraftsBoard() {
     setError("");
     try {
       const updated = await apiPost<Post>(`/posts/${p.id}/retry`);
-      setPosts((prev) => prev.map((x) => (x.id === p.id ? updated : x)));
+      setCols((prev) => {
+        const next: Record<string, Post[]> = {};
+        for (const k of Object.keys(prev))
+          next[k] = prev[k].map((x) => (x.id === p.id ? updated : x));
+        return next;
+      });
       notify({ tone: "info", title: "Retrying publish…" });
     } catch (err) {
       setError(err instanceof ApiError ? err.body : (err as Error).message);
@@ -204,12 +249,11 @@ function DraftsBoard() {
         title: "Draft generated",
         body: newPost.hook.slice(0, 80),
       });
-      // Generated from an Inbox trend → land straight in the cockpit.
       if (pinnedTrendId) {
         router.push(`/drafts/${newPost.id}`);
         return;
       }
-      await fetchPosts();
+      await fetchOverview();
     } catch (e) {
       setError(e instanceof ApiError ? e.body : (e as Error).message);
     } finally {
@@ -217,126 +261,253 @@ function DraftsBoard() {
     }
   };
 
-  const toggleGenPlatform = (p: GenPlatform) => {
+  const toggleGenPlatform = (p: GenPlatform) =>
     setGenPlatforms((prev) =>
       prev.includes(p) ? prev.filter((x) => x !== p) : [...prev, p],
     );
-  };
-
-  if (authLoading || !session) {
-    return <main className="flex-1 p-8 text-ink-lo">Loading…</main>;
-  }
 
   return (
-    <main className="mx-auto w-full max-w-7xl px-6 py-10">
-      <header className="mb-6">
-        <h1 className="font-serif text-3xl tracking-tight text-ink-hi">Drafts</h1>
-        <p className="mt-2 text-sm text-ink-mid">
-          The editorial funnel, left to right. Pull whatever needs you next.
-        </p>
-      </header>
+    <main className="flex h-full flex-col">
+      {/* Fixed chrome — header + generate strip. */}
+      <div className="shrink-0 px-6 pt-10">
+        <header className="mb-6">
+          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+            Drafts
+          </h1>
+          <p className="mt-2 text-sm text-ink-mid">
+            The editorial funnel, left to right. Pull whatever needs you next.
+          </p>
+        </header>
 
-      {pinnedTrendTitle && (
-        <Banner
-          tone="info"
-          title="Generating from this trend"
-          className="mb-4"
-          onDismiss={() => router.replace("/drafts")}
-        >
-          {pinnedTrendTitle}
-        </Banner>
-      )}
-
-      {/* Generate strip — Today's CTA (and Inbox "Generate →") lands here. */}
-      <section className="mb-6 rounded-lg border border-border bg-surface-1 p-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <select
-            value={genCategory}
-            onChange={(e) => setGenCategory(e.target.value as PostCategory)}
-            className="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink-hi focus:border-ink-lo focus:outline-none"
+        {pinnedTrendTitle && (
+          <Banner
+            tone="info"
+            title={`Generating from this trend as “${CATEGORY_LABEL[genCategory]}”`}
+            className="mb-4"
+            onDismiss={() => router.replace("/drafts")}
           >
-            {GENERATABLE.map((c) => (
-              <option key={c} value={c}>
-                {CATEGORY_LABEL[c]}
-              </option>
-            ))}
-          </select>
-          <div className="flex flex-wrap gap-2">
-            {platformOptions.map((p) => {
-              const on = genPlatforms.includes(p.id);
-              return (
-                <button
-                  key={p.id}
-                  type="button"
-                  onClick={() => toggleGenPlatform(p.id)}
-                  className={
-                    "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors " +
-                    (on
-                      ? "border-accent/60 bg-accent/10 text-ink-hi"
-                      : "border-border text-ink-mid hover:bg-surface-2 hover:text-ink-hi")
-                  }
-                >
-                  {on ? "✓ " : ""}
-                  {p.label}
-                </button>
-              );
-            })}
-          </div>
-          <button
-            type="button"
-            onClick={generate}
-            disabled={generating || genPlatforms.length === 0}
-            className="ml-auto rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:opacity-90 disabled:opacity-50"
-          >
-            {generating ? "Generating…" : "Generate a draft"}
-          </button>
-        </div>
-        <p className="mt-2 text-xs text-ink-lo">
-          One draft, one editorial cycle. Each non-LinkedIn platform gets a
-          compressed variant generated alongside.
-        </p>
-      </section>
+            {pinnedTrendTitle}
+          </Banner>
+        )}
 
-      {error && (
-        <Banner tone="error" className="mb-6">
-          {error}
-        </Banner>
-      )}
-
-      {/* The board. Desktop: 4 columns; tablet: 2×2; mobile: stacked. */}
-      <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        {buckets.map((col) => (
-          <section key={col.id} className="min-w-0">
-            <div className="mb-3 flex items-center justify-between border-b border-border pb-2">
-              <h2 className="text-sm font-medium text-ink-hi">{col.label}</h2>
-              <span className="text-xs text-ink-lo">{col.items.length}</span>
-            </div>
-            <div className="space-y-3">
-              {col.items.map(({ post, violations }) => (
-                <BoardCard
-                  key={post.id}
-                  post={post}
-                  violations={violations}
-                  retrying={retryingId === post.id}
-                  onRetry={() => retryPost(post)}
-                  onDelete={() => deletePost(post)}
-                />
+        <section className="mb-4 rounded-lg border border-border bg-surface-1 p-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <select
+              value={genCategory}
+              onChange={(e) => setGenCategory(e.target.value as PostCategory)}
+              className="rounded-md border border-border bg-surface-2 px-3 py-2 text-sm text-ink-hi focus:border-ink-lo focus:outline-none"
+            >
+              {GENERATABLE.map((c) => (
+                <option key={c} value={c}>
+                  {CATEGORY_LABEL[c]}
+                </option>
               ))}
-              {!loading && col.items.length === 0 && (
-                <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-ink-lo">
-                  Nothing here
-                </p>
-              )}
-              {loading && col.items.length === 0 && (
-                <p className="px-3 py-6 text-center text-xs text-ink-lo">Loading…</p>
-              )}
+            </select>
+            <div className="flex flex-wrap gap-2">
+              {platformOptions.map((p) => {
+                const on = genPlatforms.includes(p.id);
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => toggleGenPlatform(p.id)}
+                    className={
+                      "rounded-md border px-3 py-1.5 text-xs font-medium transition-colors " +
+                      (on
+                        ? "border-accent/60 bg-accent/10 text-ink-hi"
+                        : "border-border text-ink-mid hover:bg-surface-2 hover:text-ink-hi")
+                    }
+                  >
+                    {on ? "✓ " : ""}
+                    {p.label}
+                  </button>
+                );
+              })}
             </div>
-          </section>
-        ))}
+            <button
+              type="button"
+              onClick={generate}
+              disabled={generating || genPlatforms.length === 0}
+              className="ml-auto rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-ink hover:opacity-90 disabled:opacity-50"
+            >
+              {generating ? "Generating…" : "Generate a draft"}
+            </button>
+          </div>
+        </section>
+
+        {error && (
+          <Banner tone="error" className="mb-4">
+            {error}
+          </Banner>
+        )}
+      </div>
+
+      {/* Scrolling board body — bounded to this region, not the page. */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-10">
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+          {COLUMNS.map((col) => {
+            const items = cols[col.id] ?? [];
+            const total = col.count(stats);
+            const more = total - items.length;
+            return (
+              <section key={col.id} className="min-w-0">
+                <div className="mb-3 flex items-center justify-between border-b border-border pb-2">
+                  <h2 className="text-sm font-medium text-ink-hi">
+                    {col.label}
+                  </h2>
+                  <span className="text-xs text-ink-lo">{total}</span>
+                </div>
+                <div className="space-y-3">
+                  {items.map((post) => (
+                    <BoardCard
+                      key={post.id}
+                      post={post}
+                      violations={violationsOf(post)}
+                      retrying={retryingId === post.id}
+                      onRetry={() => retryPost(post)}
+                      onDelete={() => deletePost(post)}
+                    />
+                  ))}
+                  {!loading && items.length === 0 && (
+                    <p className="rounded-md border border-dashed border-border px-3 py-6 text-center text-xs text-ink-lo">
+                      Nothing here
+                    </p>
+                  )}
+                  {loading && items.length === 0 && (
+                    <p className="px-3 py-6 text-center text-xs text-ink-lo">
+                      Loading…
+                    </p>
+                  )}
+                  {more > 0 && (
+                    <Link
+                      href={col.viewAll}
+                      className="block rounded-md border border-border px-3 py-2 text-center text-xs font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi"
+                    >
+                      View all {total} →
+                    </Link>
+                  )}
+                </div>
+              </section>
+            );
+          })}
+        </div>
       </div>
     </main>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Full single-status list (?view=draft|approved) with "Load more" paging.
+
+function StatusListView({ status }: { status: "draft" | "approved" }) {
+  const { notify } = useToast();
+  const [items, setItems] = useState<Post[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
+  const [hasMore, setHasMore] = useState(false);
+  const [error, setError] = useState("");
+
+  const load = useCallback(
+    async (offset: number) => {
+      if (offset === 0) setLoading(true);
+      else setLoadingMore(true);
+      setError("");
+      try {
+        const page = await apiGet<Post[]>(
+          `/posts?status=${status}&limit=${LIST_PAGE}&offset=${offset}`,
+        );
+        setItems((prev) => (offset === 0 ? page : [...prev, ...page]));
+        setHasMore(page.length === LIST_PAGE);
+      } catch (e) {
+        setError(e instanceof ApiError ? e.body : (e as Error).message);
+      } finally {
+        setLoading(false);
+        setLoadingMore(false);
+      }
+    },
+    [status],
+  );
+
+  useEffect(() => {
+    load(0);
+  }, [load]);
+
+  const deletePost = async (p: Post) => {
+    if (!confirm(`Delete draft "${p.hook.slice(0, 60)}"?`)) return;
+    const snapshot = items;
+    setItems((prev) => prev.filter((x) => x.id !== p.id));
+    try {
+      await apiDelete(`/posts/${p.id}`);
+      notify({ tone: "success", title: "Draft deleted" });
+    } catch (err) {
+      setItems(snapshot);
+      setError(err instanceof ApiError ? err.body : (err as Error).message);
+    }
+  };
+
+  const label = status === "draft" ? "Draft" : "Approved";
+
+  return (
+    <main className="flex h-full flex-col">
+      <div className="shrink-0 px-6 pt-10">
+        <Link
+          href="/drafts"
+          className="text-sm text-ink-mid hover:text-ink-hi"
+        >
+          ← Board
+        </Link>
+        <h1 className="mt-2 font-serif text-3xl tracking-tight text-ink-hi">
+          {label}
+        </h1>
+        <p className="mb-6 mt-2 text-sm text-ink-mid">
+          Every {label.toLowerCase()} post, newest first.
+        </p>
+        {error && (
+          <Banner tone="error" className="mb-4">
+            {error}
+          </Banner>
+        )}
+      </div>
+
+      <div className="min-h-0 flex-1 overflow-y-auto px-6 pb-10">
+        <div className="mx-auto grid max-w-3xl grid-cols-1 gap-3 sm:grid-cols-2">
+          {items.map((post) => (
+            <BoardCard
+              key={post.id}
+              post={post}
+              violations={violationsOf(post)}
+              retrying={false}
+              onRetry={() => {}}
+              onDelete={() => deletePost(post)}
+            />
+          ))}
+        </div>
+        {!loading && items.length === 0 && (
+          <p className="py-12 text-center text-sm text-ink-lo">
+            Nothing here.
+          </p>
+        )}
+        {loading && (
+          <p className="py-12 text-center text-sm text-ink-lo">Loading…</p>
+        )}
+        {hasMore && (
+          <div className="mx-auto mt-4 max-w-3xl">
+            <button
+              type="button"
+              onClick={() => load(items.length)}
+              disabled={loadingMore}
+              className="w-full rounded-md border border-border px-4 py-2 text-sm font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
+        )}
+      </div>
+    </main>
+  );
+}
+
+// ---------------------------------------------------------------------------
 
 function BoardCard({
   post,
@@ -353,7 +524,6 @@ function BoardCard({
 }) {
   const isFailed = post.status === "failed";
   const canDelete = post.status === "draft" || post.status === "failed";
-  // De-dupe target platforms (one badge per platform).
   const platforms = Array.from(new Set(post.targets.map((t) => t.platform)));
 
   return (
@@ -394,6 +564,7 @@ function BoardCard({
               }}
               disabled={retrying}
               className="rounded-md border border-status-failed/40 px-2 py-1 text-xs font-medium text-status-failed hover:bg-status-failed/10 disabled:opacity-50"
+              title="Retry publish"
             >
               {retrying ? "Retrying…" : "Retry"}
             </button>
@@ -420,13 +591,35 @@ function BoardCard({
   );
 }
 
-// useSearchParams (for the pinned-trend deep-link) needs a Suspense boundary.
+// ---------------------------------------------------------------------------
+
+function DraftsRouter() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const { session, loading: authLoading } = useAuth();
+
+  useEffect(() => {
+    if (!authLoading && !session) router.replace("/login");
+  }, [authLoading, session, router]);
+
+  if (authLoading || !session) {
+    return <main className="flex-1 p-8 text-ink-lo">Loading…</main>;
+  }
+
+  const view = searchParams.get("view");
+  if (view === "draft" || view === "approved") {
+    return <StatusListView status={view} />;
+  }
+  return <BoardOverview />;
+}
+
+// useSearchParams (pinned-trend deep-link + ?view) needs a Suspense boundary.
 export default function DraftsPage() {
   return (
     <Suspense
       fallback={<main className="flex-1 p-8 text-ink-lo">Loading…</main>}
     >
-      <DraftsBoard />
+      <DraftsRouter />
     </Suspense>
   );
 }
