@@ -23,7 +23,7 @@ Auto-loaded by Claude on every session inside this repo. Imperative rules — wh
 
 Do not swap these without explicit user approval.
 
-- **LLM**: Groq — `llama-3.3-70b-versatile` (primary), `llama-3.1-8b-instant` (fast).
+- **LLM**: Groq — `qwen/qwen3.6-27b` (primary), `meta-llama/llama-4-scout-17b-16e-instruct` (fast). Migrated 2026-07 off the deprecated `llama-3.3-70b-versatile` / `llama-3.1-8b-instant` (Groq decommission 2026-08-16). qwen reasons by default, so `groq_client._reasoning_effort_for` auto-pins `reasoning_effort="none"` for `qwen/` models (and `low` for `openai/gpt-oss*`) — without it, reasoning tokens truncate length-capped stages and empty out JSON stages. `gpt-oss-120b` (Groq's own recommended replacement) was rejected in A/B testing: hallucinated off-topic and can't disable reasoning.
 - **Image generation**: HTML + TailwindCSS templates rendered to PNG via Playwright (headless Chromium). Diffusion image gen is *secondary only*, reserved for memes / illustrations / campaign art.
 - **Backend**: FastAPI + SQLAlchemy + Alembic. Async by default.
 - **Scheduler**: APScheduler, in-process, with `SQLAlchemyJobStore` backed by Postgres. Started in FastAPI lifespan hook.

@@ -140,6 +140,49 @@ async def test_response_format_omitted_when_none(stub_client, audit_recorder):
     assert "response_format" not in completions.calls[0]
 
 
+async def test_reasoning_effort_auto_set_for_qwen(stub_client, audit_recorder):
+    completions = stub_client()
+    await groq_client.chat(
+        stage="voice",
+        messages=[{"role": "user", "content": "q"}],
+        model="qwen/qwen3.6-27b",
+    )
+    # qwen reasons by default — client must pin it off or JSON stages break.
+    assert completions.calls[0]["reasoning_effort"] == "none"
+
+
+async def test_reasoning_effort_low_for_gpt_oss(stub_client, audit_recorder):
+    completions = stub_client()
+    await groq_client.chat(
+        stage="x",
+        messages=[{"role": "user", "content": "q"}],
+        model="openai/gpt-oss-120b",
+    )
+    assert completions.calls[0]["reasoning_effort"] == "low"
+
+
+async def test_reasoning_effort_omitted_for_non_reasoning_model(stub_client, audit_recorder):
+    completions = stub_client()
+    await groq_client.chat(
+        stage="x",
+        messages=[{"role": "user", "content": "q"}],
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+    )
+    # llama rejects reasoning_effort — it must not be sent.
+    assert "reasoning_effort" not in completions.calls[0]
+
+
+async def test_reasoning_effort_explicit_override(stub_client, audit_recorder):
+    completions = stub_client()
+    await groq_client.chat(
+        stage="x",
+        messages=[{"role": "user", "content": "q"}],
+        model="qwen/qwen3.6-27b",
+        reasoning_effort="low",
+    )
+    assert completions.calls[0]["reasoning_effort"] == "low"
+
+
 async def test_non_retryable_error_propagates_and_still_audits(
     stub_client, audit_recorder
 ):

@@ -24,8 +24,13 @@ class Settings(BaseSettings):
 
     # Groq
     GROQ_API_KEY: str = ""
-    GROQ_MODEL_PRIMARY: str = "llama-3.3-70b-versatile"
-    GROQ_MODEL_FAST: str = "llama-3.1-8b-instant"
+    # Primary (creative/voice) + fast (extraction) tiers. Migrated off the
+    # deprecated llama-3.3-70b / llama-3.1-8b (Groq decommission 2026-08-16).
+    # Primary = qwen3.6-27b: best founder-voice in A/B testing; the groq client
+    # auto-pins reasoning_effort=none for it (qwen/ prefix). Fast = llama-4-scout:
+    # clean JSON extraction, most generous free-tier limits, no reasoning params.
+    GROQ_MODEL_PRIMARY: str = "qwen/qwen3.6-27b"
+    GROQ_MODEL_FAST: str = "meta-llama/llama-4-scout-17b-16e-instruct"
 
     # LinkedIn (single app — personal posting in MVP)
     LINKEDIN_CLIENT_ID: str = ""

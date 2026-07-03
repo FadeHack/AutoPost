@@ -1,10 +1,10 @@
 """Five-stage trend → draft pipeline.
 
-Stage 1: angle synthesis    — primary model (llama-3.3-70b-versatile)
+Stage 1: angle synthesis    — primary model (GROQ_MODEL_PRIMARY)
 Stage 2: founder-voice rewrite — primary model + deterministic AI-tell strip
-Stage 3: structured extract → hook/body/tags JSON — FAST model (llama-3.1-8b-instant)
+Stage 3: structured extract → hook/body/tags JSON — FAST model (GROQ_MODEL_FAST)
 Stage 4: visual extract → pull_quote / metric / carousel_slides JSON — FAST model
-Stage 5: AI-image prompt → one short visual prompt string for Flux — primary model (llama-3.3-70b-versatile)
+Stage 5: AI-image prompt → one short visual prompt string for Flux — primary model
 
 `run_pipeline()` is pure (LLM only, no DB) so it can be unit-tested with a
 mocked groq_client. `generate_draft()` wraps it with the DB orchestration:
@@ -445,12 +445,12 @@ async def extract_ai_image_prompt(
 
     Falls back to `_AI_IMAGE_PROMPT_FALLBACK` if the model returns bad JSON or
     an empty string. The renderer can trust the return value is always usable.
-    Runs on the primary 70B model — the 8B fast tier produced weak, generic
-    visual prompts for this task.
+    Runs on the primary model — the fast tier produced weak, generic visual
+    prompts for this task.
     """
-    # Primary 70B, not the 8B fast model: writing a concise, evocative 12-25
-    # word visual prompt is a small but genuinely creative task the 8B model
-    # underperforms on. One ~200-token call per post, so cost is negligible.
+    # Primary model, not the fast tier: writing a concise, evocative visual
+    # prompt is a small but genuinely creative task the fast model underperforms
+    # on. One short call per post, so cost is negligible.
     raw = await groq_client.chat(
         stage="ai_image_prompt",
         model=settings.GROQ_MODEL_PRIMARY,
@@ -565,7 +565,7 @@ async def run_pipeline(
 
     # Stage 5 — AI-image prompt. Persisted onto the same extracts JSONB so
     # render_post can switch between template and AI-image kinds without an
-    # extra DB lookup. Runs on the primary 70B model for prompt quality.
+    # extra DB lookup. Runs on the primary model for prompt quality.
     ai_image_prompt = await extract_ai_image_prompt(
         voiced_text=voiced, prompt_id=prompt.id
     )
@@ -579,8 +579,8 @@ async def compress_for_bluesky(
 ) -> str:
     """Rewrite a LinkedIn-shaped post for Bluesky's 300-char cap.
 
-    Primary 70B + tight system prompt — same reasoning as run_platform_rewrite:
-    the 8B fast model overshoots the hard 300-char cap. Falls back to a
+    Primary model + tight system prompt — same rationale as run_platform_rewrite:
+    the fast model overshoots the hard 300-char cap. Falls back to a
     brand-safe one-liner when the rewrite is empty or still over the cap —
     better to ship a publishable Bluesky post than a 1641-char one that fails
     at publish.
@@ -667,9 +667,9 @@ async def run_platform_rewrite(
     a mangled post (project philosophy, see [[project_per_platform_generation_strategy]])."""
     raw = await groq_client.chat(
         stage=f"voice_{prompt.platform.value if prompt.platform else 'any'}",
-        # Primary 70B, not the 8B fast model: the per-platform rewrite has to
-        # honor a hard char budget (Bluesky ≤300) and the 8B reliably overshoots
-        # (e.g. 407 on a 300 cap). The 70B follows the length constraint, and a
+        # Primary model, not the fast tier: the per-platform rewrite has to
+        # honor a hard char budget (Bluesky ≤300) and the fast model reliably
+        # overshoots. The primary model follows the length constraint, and a
         # one-shot rewrite is cheap enough to not need the fast tier.
         model=settings.GROQ_MODEL_PRIMARY,
         prompt_id=prompt_id or prompt.id,

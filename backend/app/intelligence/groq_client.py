@@ -29,6 +29,25 @@ log = structlog.get_logger(__name__)
 _RETRYABLE = (APIConnectionError, RateLimitError)
 
 
+def _reasoning_effort_for(model: str) -> str | None:
+    """Default reasoning budget for models that reason by default on Groq.
+
+    Our prompts are tightly scripted and length-constrained, so hidden reasoning
+    tokens are pure overhead here — they eat `max_tokens` and can leave a JSON
+    stage with empty content (json_validate_failed). We therefore pin reasoning
+    as low as each family allows:
+      - qwen3 accepts "none" → fully off, behaves like an instant model.
+      - gpt-oss only accepts low/medium/high → "low".
+    Non-reasoning models (llama) reject the param, so we attach nothing.
+    Returns None when the model takes no reasoning_effort.
+    """
+    if model.startswith("qwen/"):
+        return "none"
+    if model.startswith("openai/gpt-oss"):
+        return "low"
+    return None
+
+
 def _client() -> AsyncGroq:
     if not settings.GROQ_API_KEY:
         raise RuntimeError("GROQ_API_KEY is not set in backend/.env")
@@ -76,6 +95,7 @@ async def chat(
     temperature: float = 0.7,
     max_tokens: int = 1024,
     response_format: dict[str, Any] | None = None,
+    reasoning_effort: str | None = None,
     post_id: uuid.UUID | None = None,
     prompt_id: uuid.UUID | None = None,
 ) -> str:
@@ -83,8 +103,14 @@ async def chat(
 
     `stage` is the pipeline-phase label (e.g. 'angle', 'voice', 'extract')
     and is recorded on every audit row.
+
+    `reasoning_effort` overrides the per-model default from
+    `_reasoning_effort_for`. Leave it None to let the client pick (recommended):
+    reasoning models get pinned to their lowest budget, non-reasoning models get
+    nothing.
     """
     chosen_model = model or settings.GROQ_MODEL_PRIMARY
+    effort = reasoning_effort if reasoning_effort is not None else _reasoning_effort_for(chosen_model)
     client = _client()
 
     input_text = "\n\n".join(f"[{m['role']}]\n{m['content']}" for m in messages)
@@ -111,6 +137,8 @@ async def chat(
                 }
                 if response_format is not None:
                     kwargs["response_format"] = response_format
+                if effort is not None:
+                    kwargs["reasoning_effort"] = effort
                 resp = await client.chat.completions.create(**kwargs)
                 output_text = resp.choices[0].message.content or ""
                 if resp.usage is not None:
