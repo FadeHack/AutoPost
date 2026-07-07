@@ -52,6 +52,14 @@ type InstagramStatus = {
   expires_at: string | null;
 };
 
+type XStatus = {
+  enabled: boolean;
+  connected: boolean;
+  username: string | null;
+  display_name: string | null;
+  expires_at: string | null;
+};
+
 function Section({
   title,
   children,
@@ -106,6 +114,11 @@ export default function Connections() {
   const [instagramLoading, setInstagramLoading] = useState(true);
   const [instagramConnecting, setInstagramConnecting] = useState(false);
   const [instagramError, setInstagramError] = useState("");
+
+  const [xStatus, setXStatus] = useState<XStatus | null>(null);
+  const [xLoading, setXLoading] = useState(true);
+  const [xConnecting, setXConnecting] = useState(false);
+  const [xError, setXError] = useState("");
 
   useEffect(() => {
     if (!session) return;
@@ -175,6 +188,23 @@ export default function Connections() {
         }),
       )
       .finally(() => setInstagramLoading(false));
+  }, [session]);
+
+  useEffect(() => {
+    if (!session) return;
+    setXLoading(true);
+    apiGet<XStatus>("/auth/x/status")
+      .then(setXStatus)
+      .catch(() =>
+        setXStatus({
+          enabled: false,
+          connected: false,
+          username: null,
+          display_name: null,
+          expires_at: null,
+        }),
+      )
+      .finally(() => setXLoading(false));
   }, [session]);
 
   const connect = async () => {
@@ -310,6 +340,36 @@ export default function Connections() {
       });
     } catch (e) {
       setInstagramError(e instanceof ApiError ? e.body : (e as Error).message);
+    }
+  };
+
+  const connectX = async () => {
+    setXConnecting(true);
+    setXError("");
+    try {
+      const { authorize_url } = await apiGet<{ authorize_url: string }>(
+        "/auth/x/start",
+      );
+      window.location.href = authorize_url;
+    } catch (e) {
+      setXError(e instanceof ApiError ? e.body : (e as Error).message);
+      setXConnecting(false);
+    }
+  };
+
+  const disconnectX = async () => {
+    if (!confirm("Disconnect X? Any scheduled X publishes will fail.")) return;
+    try {
+      await apiDelete("/auth/x/disconnect");
+      setXStatus({
+        enabled: true,
+        connected: false,
+        username: null,
+        display_name: null,
+        expires_at: null,
+      });
+    } catch (e) {
+      setXError(e instanceof ApiError ? e.body : (e as Error).message);
     }
   };
 
@@ -590,6 +650,46 @@ export default function Connections() {
           {instagramError && (
             <Banner tone="error" className="mt-4">
               <span className="font-mono break-all">{instagramError}</span>
+            </Banner>
+          )}
+        </Section>
+      )}
+
+      {!xLoading && xStatus?.enabled && (
+        <Section title="X">
+          {xStatus.connected ? (
+            <div className="space-y-3">
+              <p className="text-sm text-ink-hi">
+                Connected as{" "}
+                <span className="font-medium">@{xStatus.username}</span>
+                {xStatus.display_name && (
+                  <span className="text-ink-lo"> ({xStatus.display_name})</span>
+                )}
+              </p>
+              {xStatus.expires_at && (
+                <p className="text-xs text-ink-lo">
+                  Token expires:{" "}
+                  {new Date(xStatus.expires_at).toLocaleString()} (auto-refreshes)
+                </p>
+              )}
+              <button onClick={disconnectX} className={LINK_BTN}>
+                Disconnect
+              </button>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <p className="text-xs text-ink-lo">
+                X uses OAuth 2.0. You&apos;ll be redirected to authorize, then
+                back here. Note: the X API is paid — each publish costs ~$0.015.
+              </p>
+              <button onClick={connectX} disabled={xConnecting} className={PRIMARY_BTN}>
+                {xConnecting ? "Redirecting…" : "Connect X"}
+              </button>
+            </div>
+          )}
+          {xError && (
+            <Banner tone="error" className="mt-4">
+              <span className="font-mono break-all">{xError}</span>
             </Banner>
           )}
         </Section>

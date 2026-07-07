@@ -38,6 +38,7 @@ const GEN_PLATFORMS: { id: GenPlatform; label: string }[] = [
 ];
 const THREADS_PLATFORM = { id: "threads" as GenPlatform, label: "Threads" };
 const INSTAGRAM_PLATFORM = { id: "instagram" as GenPlatform, label: "Instagram" };
+const X_PLATFORM = { id: "x" as GenPlatform, label: "X" };
 
 type PostTarget = { id: string; platform: Platform; status: string };
 
@@ -149,12 +150,14 @@ function BoardOverview() {
   const [genPlatforms, setGenPlatforms] = useState<GenPlatform[]>(["linkedin"]);
   const [threadsEnabled, setThreadsEnabled] = useState(false);
   const [instagramEnabled, setInstagramEnabled] = useState(false);
+  const [xEnabled, setXEnabled] = useState(false);
   const [retryingId, setRetryingId] = useState<string | null>(null);
 
   const platformOptions = [
     ...GEN_PLATFORMS,
     ...(threadsEnabled ? [THREADS_PLATFORM] : []),
     ...(instagramEnabled ? [INSTAGRAM_PLATFORM] : []),
+    ...(xEnabled ? [X_PLATFORM] : []),
   ];
 
   useEffect(() => {
@@ -164,6 +167,9 @@ function BoardOverview() {
     apiGet<{ enabled: boolean }>("/auth/instagram/status")
       .then((s) => setInstagramEnabled(!!s.enabled))
       .catch(() => setInstagramEnabled(false));
+    apiGet<{ enabled: boolean }>("/auth/x/status")
+      .then((s) => setXEnabled(!!s.enabled))
+      .catch(() => setXEnabled(false));
   }, []);
 
   const fetchOverview = useCallback(async () => {

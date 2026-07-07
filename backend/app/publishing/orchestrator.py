@@ -45,6 +45,7 @@ from app.publishing import instagram as _instagram  # noqa: F401 — triggers re
 from app.publishing import linkedin as _linkedin  # noqa: F401 — triggers register
 from app.publishing import mastodon as _mastodon  # noqa: F401 — triggers register
 from app.publishing import threads as _threads  # noqa: F401 — triggers register
+from app.publishing import x as _x  # noqa: F401 — triggers register
 from app.publishing.base import (
     AuthPublishError,
     PermanentPublishError,
@@ -130,6 +131,14 @@ def build_commentary(post: Post, target: PostTarget | None = None) -> str:
 # --- Account loaders ---
 
 
+def _is_manual_skip_platform(platform: Platform) -> bool:
+    """Platforms we generate content for but publish by hand when no API account
+    is connected. Currently just X (paid API — the operator may keep the flag on
+    for the 280-char rewrite + downloadable image, then paste manually). For
+    these, a missing account is an intentional skip, not a failure."""
+    return platform == Platform.x
+
+
 async def _load_account(session: AsyncSession, post: Post, platform: Platform):
     if platform == Platform.linkedin:
         return await _linkedin.load_account(session, post)
@@ -141,6 +150,8 @@ async def _load_account(session: AsyncSession, post: Post, platform: Platform):
         return await _threads.load_account(session, post)
     if platform == Platform.instagram:
         return await _instagram.load_account(session, post)
+    if platform == Platform.x:
+        return await _x.load_account(session, post)
     raise PermanentPublishError(
         f"no account loader for platform '{platform.value}'"
     )
@@ -187,10 +198,17 @@ async def _maybe_aggregate_post_status(
     targets = list((await session.execute(stmt)).scalars().all())
     if not targets:
         return
-    terminal = {TargetStatus.published, TargetStatus.failed}
+    terminal = {TargetStatus.published, TargetStatus.failed, TargetStatus.skipped}
     if any(t.status not in terminal for t in targets):
         return
-    any_published = any(t.status == TargetStatus.published for t in targets)
+    # `skipped` legs (manual-post platforms with no account) don't count toward
+    # published/failed — the roll-up is decided by the legs we actually attempted.
+    attempted = [t for t in targets if t.status != TargetStatus.skipped]
+    if not attempted:
+        # Every leg was skipped (e.g. an X-only draft posted entirely by hand).
+        # Nothing to publish via API; leave post.status as-is.
+        return
+    any_published = any(t.status == TargetStatus.published for t in attempted)
     new_status = PostStatus.published if any_published else PostStatus.failed
     if post.status != new_status:
         post.status = new_status
@@ -231,7 +249,33 @@ async def publish_target(session: AsyncSession, target_id: UUID) -> PostTarget:
 
     publisher_cls = get_publisher_class(target.platform)
     publisher = publisher_cls()
-    account = await _load_account(session, post, target.platform)
+    try:
+        account = await _load_account(session, post, target.platform)
+    except PermanentPublishError:
+        # Manual-post platform (e.g. X) with no API account connected: the
+        # operator posts it by hand, so skip cleanly instead of failing.
+        if _is_manual_skip_platform(target.platform):
+            target.status = TargetStatus.skipped
+            target.error = None
+            session.add(
+                PublishingLog(
+                    post_id=post.id,
+                    target_id=target.id,
+                    attempt=1,
+                    status=PublishingStatus.success,
+                    error="skipped: no API account connected (manual post)",
+                )
+            )
+            await _maybe_aggregate_post_status(session, post)
+            await session.commit()
+            await session.refresh(target)
+            log.info(
+                "publisher.skipped",
+                target_id=str(target.id),
+                platform=target.platform.value,
+            )
+            return target
+        raise
 
     commentary = build_commentary(post, target)
     if len(commentary) > publisher.char_limit:

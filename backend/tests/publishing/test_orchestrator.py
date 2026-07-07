@@ -293,6 +293,73 @@ async def test_publish_target_permanent_error_marks_failed_no_retry(patched):
     assert call_count["n"] == 1
 
 
+# ---------------------------------------------------------------------------
+# publish_target — manual-skip (X with no connected account)
+# ---------------------------------------------------------------------------
+
+
+async def test_publish_target_x_no_account_marks_skipped(patched, monkeypatch):
+    """X target + no connected account → skipped (manual post), NOT failed."""
+    post = _fake_post()
+    target = _fake_target(platform=Platform.x, post=post)
+    session = _make_session(target=target, post=post)
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_account",
+        AsyncMock(side_effect=PermanentPublishError("no connected X account")),
+    )
+
+    result = await orchestrator.publish_target(session, target.id)
+
+    assert result.status == TargetStatus.skipped
+    assert result.error is None
+
+
+async def test_publish_target_non_x_no_account_still_raises(patched, monkeypatch):
+    """A missing account on a non-manual platform is a real error, not a skip."""
+    post = _fake_post()
+    target = _fake_target(platform=Platform.linkedin, post=post)
+    session = _make_session(target=target, post=post)
+    monkeypatch.setattr(
+        orchestrator,
+        "_load_account",
+        AsyncMock(side_effect=PermanentPublishError("no connected LinkedIn account")),
+    )
+
+    with pytest.raises(PermanentPublishError):
+        await orchestrator.publish_target(session, target.id)
+
+
+async def test_aggregation_skipped_leg_is_not_a_failure(patched):
+    """A published LinkedIn leg + a skipped X leg → post rolls up to published."""
+    post = _fake_post(status=PostStatus.scheduled)
+    published = _fake_target(
+        platform=Platform.linkedin, status=TargetStatus.published, post=post
+    )
+    published.published_at = datetime.now(timezone.utc)
+    skipped = _fake_target(
+        platform=Platform.x, status=TargetStatus.skipped, post=post
+    )
+    session = _make_session(target=published, post=post, other_targets=[skipped])
+
+    await orchestrator._maybe_aggregate_post_status(session, post)
+
+    assert post.status == PostStatus.published
+
+
+async def test_aggregation_all_skipped_leaves_post_status_alone(patched):
+    """An all-skipped draft (X-only, posted by hand) doesn't flip to published."""
+    post = _fake_post(status=PostStatus.scheduled)
+    skipped = _fake_target(
+        platform=Platform.x, status=TargetStatus.skipped, post=post
+    )
+    session = _make_session(target=skipped, post=post)
+
+    await orchestrator._maybe_aggregate_post_status(session, post)
+
+    assert post.status == PostStatus.scheduled
+
+
 async def test_publish_target_transient_then_success(patched):
     call_count = {"n": 0}
 

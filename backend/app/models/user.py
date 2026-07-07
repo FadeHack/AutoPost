@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.linkedin_account import LinkedInAccount
     from app.models.mastodon_account import MastodonAccount
     from app.models.threads_account import ThreadsAccount
+    from app.models.x_account import XAccount
 
 
 class User(Base, TimestampMixin):
@@ -46,6 +47,10 @@ class User(Base, TimestampMixin):
         cascade="all, delete-orphan",
     )
     instagram_accounts: Mapped[list["InstagramAccount"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    x_accounts: Mapped[list["XAccount"]] = relationship(
         back_populates="user",
         cascade="all, delete-orphan",
     )

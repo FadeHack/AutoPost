@@ -59,6 +59,12 @@ MAX_CAROUSEL_SLIDES = 3
 
 POLISH_ESCALATE_THRESHOLD = 2
 
+# Per-platform rewrites over-shoot the char cap on dense sources (LLMs can't
+# count chars). When the first pass is over budget, re-ask the model to shorten
+# up to this many times before giving up (and failing the gate loudly). Only
+# fires on over-cap output, so short rewrites pay nothing.
+MAX_SHORTEN_RETRIES = 3
+
 
 _VOICE_REWRITE_SYSTEM = """You are a copy editor rewriting LinkedIn posts in a founder voice.
 
@@ -644,6 +650,7 @@ PLATFORM_CHAR_LIMITS: dict[Platform, int] = {
     Platform.mastodon: 500,
     Platform.threads: 500,
     Platform.instagram: 2200,
+    Platform.x: 280,
 }
 
 
@@ -661,37 +668,95 @@ async def run_platform_rewrite(
     ≤500, Instagram hashtag-heavy caption). We feed it the canonical
     LinkedIn-shaped post as source material and let it reshape.
 
-    AI-tells are stripped deterministically afterwards. We do NOT truncate to
-    the char limit: if a seeded prompt over-shoots, the orchestrator's gate
-    fails the target loudly — that's the signal to fix the prompt, not to ship
-    a mangled post (project philosophy, see [[project_per_platform_generation_strategy]])."""
-    raw = await groq_client.chat(
-        stage=f"voice_{prompt.platform.value if prompt.platform else 'any'}",
-        # Primary model, not the fast tier: the per-platform rewrite has to
-        # honor a hard char budget (Bluesky ≤300) and the fast model reliably
-        # overshoots. The primary model follows the length constraint, and a
-        # one-shot rewrite is cheap enough to not need the fast tier.
-        model=settings.GROQ_MODEL_PRIMARY,
-        prompt_id=prompt_id or prompt.id,
-        messages=[
+    AI-tells are stripped deterministically afterwards.
+
+    Char budget: LLMs can't count characters, so the length rule in the prompt
+    is only approximate — dense source posts (lots of concretes to preserve)
+    reliably push short-platform rewrites (X ≤280, Bluesky ≤300) over budget. We
+    still NEVER truncate; instead, when the first pass over-shoots we RE-ASK the
+    model to shorten it (up to `MAX_SHORTEN_RETRIES` times, telling it the exact
+    overage) and keep the shortest attempt. This is regeneration, not clipping —
+    it fixes the common overshoot without shipping a mangled mid-word cut. If it
+    still over-shoots after retries, the shortest attempt is returned whole and
+    the orchestrator's gate fails the target loudly (unchanged philosophy, see
+    [[project_per_platform_generation_strategy]])."""
+    platform_label = prompt.platform.value if prompt.platform else "any"
+    stage = f"voice_{platform_label}"
+    max_tokens = min(800, max(200, char_limit // 3))
+
+    async def _rewrite(messages: list[dict], temperature: float) -> str:
+        raw = await groq_client.chat(
+            # Primary model, not the fast tier: the per-platform rewrite has to
+            # honor a hard char budget and the fast model reliably overshoots.
+            # A one-shot rewrite is cheap enough to not need the fast tier.
+            stage=stage,
+            model=settings.GROQ_MODEL_PRIMARY,
+            prompt_id=prompt_id or prompt.id,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        out, violations = voice.strip_ai_tells(raw or "")
+        if violations:
+            log.info("generator.platform_rewrite.tells_stripped", violations=violations)
+        return out.strip().strip('"').strip("'").strip()
+
+    best = await _rewrite(
+        [
             {"role": "system", "content": prompt.body},
             {"role": "user", "content": source_text},
         ],
-        temperature=0.5,
-        max_tokens=min(800, max(200, char_limit // 3)),
+        0.5,
     )
-    out, violations = voice.strip_ai_tells(raw or "")
-    out = out.strip().strip('"').strip("'").strip()
-    if violations:
-        log.info("generator.platform_rewrite.tells_stripped", violations=violations)
-    if len(out) > char_limit:
+
+    # The model always overshoots its target a little, so on the shorten pass we
+    # aim BELOW the real cap — an overshoot of the target then still lands inside
+    # the cap. ~10% margin (min 15 chars).
+    retry_target = char_limit - max(15, char_limit // 10)
+    for attempt in range(MAX_SHORTEN_RETRIES):
+        if len(best) <= char_limit:
+            break
+        log.info(
+            "generator.platform_rewrite.shorten_retry",
+            platform=platform_label,
+            length=len(best),
+            cap=char_limit,
+            attempt=attempt + 1,
+        )
+        # Lower temperature on the shorten pass for tighter compliance. Feed the
+        # previous (over-cap) draft and the exact overage — asking to compress an
+        # already-distilled draft is cheaper and more reliable than re-deriving
+        # from the full source.
+        candidate = await _rewrite(
+            [
+                {"role": "system", "content": prompt.body},
+                {
+                    "role": "user",
+                    "content": (
+                        f"Your previous version was {len(best)} characters, over the "
+                        f"{char_limit}-character hard limit by {len(best) - char_limit}. "
+                        f"Rewrite it to be AT MOST {retry_target} characters — that is "
+                        f"the target, not a suggestion. Keep the opening opinion and the "
+                        f"single strongest concrete; cut everything else (drop a hashtag "
+                        f"or the weaker number if needed). Never truncate mid-sentence.\n\n"
+                        f"Previous version:\n{best}"
+                    ),
+                },
+            ],
+            0.3,
+        )
+        # Keep the shortest non-empty attempt (best effort; still never clipped).
+        if candidate and len(candidate) < len(best):
+            best = candidate
+
+    if len(best) > char_limit:
         log.warning(
             "generator.platform_rewrite.over_cap",
-            platform=prompt.platform.value if prompt.platform else "any",
-            length=len(out),
+            platform=platform_label,
+            length=len(best),
             cap=char_limit,
         )
-    return out
+    return best
 
 
 async def _build_platform_commentary(

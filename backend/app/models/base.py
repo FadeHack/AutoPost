@@ -112,18 +112,26 @@ class RenderKind(str, enum.Enum):
 
 class Platform(str, enum.Enum):
     """Publishing destinations. MVP wires `linkedin` + `bluesky`; the rest
-    are scaffolded for Phase 11 Chunks B–D."""
+    are scaffolded for Phase 11 Chunks B–D. `x` (Twitter) added Phase 11
+    Chunk F — full X API v2 OAuth2-PKCE publisher (paid API, no free tier)."""
     linkedin = "linkedin"
     bluesky = "bluesky"
     mastodon = "mastodon"
     threads = "threads"
     instagram = "instagram"
+    x = "x"
 
 
 class TargetStatus(str, enum.Enum):
     """Per-target delivery lifecycle. `posts.status` caps at `scheduled`;
-    each `post_targets` row carries its own status from here on."""
+    each `post_targets` row carries its own status from here on.
+
+    `skipped` = the platform is enabled for content generation but has no API
+    account connected, so the fan-out intentionally did NOT publish it (the
+    operator posts it by hand — e.g. X while not connected). It's terminal and
+    is NOT a failure: aggregation ignores skipped legs when rolling posts up."""
     pending = "pending"
     publishing = "publishing"
     published = "published"
     failed = "failed"
+    skipped = "skipped"

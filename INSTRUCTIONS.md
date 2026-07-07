@@ -216,6 +216,45 @@ Notes:
 
 ---
 
+## Connecting X / Twitter (paid API)
+
+X is a **single fixed app**, OAuth 2.0 **Authorization Code + PKCE**. It's **disabled by default** behind `PLATFORM_X_ENABLED`. Unlike the Meta platforms, the gate here is **cost, not App Review**: the X API has **no free tier for new developers (as of 2026)** — posting is billed **~$0.015 per post** (~$0.20 if the post contains a link). You must provision a paid X app before you can connect.
+
+**Setup:**
+1. At [developer.x.com](https://developer.x.com), create a project + app, then enable **OAuth 2.0** with app type **Web App / Confidential client**.
+2. Set the app's callback/redirect URL to match `X_REDIRECT_URI` (default `http://127.0.0.1:8000/api/v1/auth/x/callback`).
+3. Ensure the app requests scopes `tweet.read tweet.write users.read media.write offline.access` (`media.write` is required to upload images; `offline.access` to get a refresh token).
+4. Fill `backend/.env`:
+   - `X_CLIENT_ID=` / `X_CLIENT_SECRET=` — the app's OAuth 2.0 Client ID/Secret.
+   - `X_REDIRECT_URI=` — must exactly match the app's registered callback.
+   - `X_SCOPES=tweet.read tweet.write users.read media.write offline.access`
+   - `PLATFORM_X_ENABLED=false` → flip to `true` once the app is provisioned. When false: `/auth/x/start` returns 503 and the dashboard + `/generate` picker hide X.
+
+**Connect:**
+1. Dashboard → **Settings → Connections → X** section → **Connect X** → redirect to X's authorize → approve.
+2. On callback the backend exchanges the code + PKCE verifier (carried in the encrypted state) for the access + refresh token pair, resolves `/2/users/me`, and persists both Fernet-encrypted tokens + `expires_at` in `x_accounts`.
+3. Verify:
+   ```sql
+   SELECT username, x_user_id, expires_at FROM x_accounts;
+   ```
+
+Notes:
+- **Token refresh is automatic — and actually exercised.** X access tokens are short-lived (~2h) with a **rotating** refresh token; `_ensure_fresh_token` (5-min lead) refreshes and re-persists BOTH tokens on every publish that lands near expiry. If the refresh token itself is revoked/dies, a 401 surfaces and you reconnect.
+- **Char limit:** 280 (standard tier). Drafts targeting X get a Bluesky-shaped 280-char rewrite from the seeded per-platform prompt; an over-cap variant fails the orchestrator's gate (never truncated).
+- **Images:** X does **not** fetch from a URL — the publisher downloads each rendered card from Supabase and uploads the bytes via `POST /2/media/upload` (one-shot, ≤4 images), then attaches the returned `media_id`s to the tweet.
+- **Cost:** every publish to X bills your X account. Keep `PLATFORM_X_ENABLED=false` when you don't want to spend.
+
+### Manual-post mode (generate-and-paste, no API cost)
+
+You can keep `PLATFORM_X_ENABLED=true` **without connecting an X account** — use the pipeline to generate X-shaped content and post it by hand:
+
+1. In `/drafts`, select **X** in the generate picker → each draft gets its own 280-char X rewrite.
+2. Open the draft cockpit → platform preview → **X** tab → **Copy text** to grab the exact variant.
+3. In the Visual panel, click **download** (next to "full size", and one per carousel slide) to save the rendered image, then attach it in the X composer by hand.
+4. If you run **Publish now** / **Schedule** on a draft that includes X, the X leg is marked **"manual" (skipped)** — not failed — so your LinkedIn/Bluesky legs publish and the pipeline stays green. Connect a real X account later and X publishes via the API automatically.
+
+---
+
 ## Common Operations
 
 (These will work as the relevant phase lands. Currently Phase 0 — only health-check works.)

@@ -11,6 +11,7 @@ export const PLATFORM_DOT: Record<Platform, string> = {
   mastodon: "bg-violet-500",
   threads: "bg-zinc-300",
   instagram: "bg-pink-500",
+  x: "bg-zinc-100",
 };
 
 const PLATFORM_TAB_ON: Record<Platform, string> = {
@@ -19,6 +20,7 @@ const PLATFORM_TAB_ON: Record<Platform, string> = {
   mastodon: "border-violet-500/60 text-ink-hi bg-violet-500/10",
   threads: "border-zinc-400/60 text-ink-hi bg-zinc-400/10",
   instagram: "border-pink-500/60 text-ink-hi bg-pink-500/10",
+  x: "border-zinc-200/60 text-ink-hi bg-zinc-200/10",
 };
 
 export function PlatformBadge({

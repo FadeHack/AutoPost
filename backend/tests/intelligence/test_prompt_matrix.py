@@ -107,6 +107,7 @@ class TestPlatformCharLimits:
             Platform.mastodon: 500,
             Platform.threads: 500,
             Platform.instagram: 2200,
+            Platform.x: 280,
         }
 
 

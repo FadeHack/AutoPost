@@ -18,7 +18,12 @@ import { PLATFORM_LABEL, type Platform, type PostCategory } from "@/lib/domain";
 // to draw yet (see CONTEXT / memory). The column drops in when Member Data
 // Portability lands.
 
-type TargetStatus = "pending" | "publishing" | "published" | "failed";
+type TargetStatus =
+  | "pending"
+  | "publishing"
+  | "published"
+  | "failed"
+  | "skipped";
 
 type PostTarget = {
   id: string;
@@ -72,6 +77,10 @@ function targetUrl(platform: Platform, urn: string | null): string | null {
     }
     case "mastodon":
       return urn.startsWith("http") ? urn : null;
+    case "x":
+      // external_urn is the numeric tweet id; the /i/web/status/ form
+      // redirects to the tweet regardless of author handle.
+      return `https://x.com/i/web/status/${urn}`;
     default:
       return null;
   }
@@ -251,6 +260,7 @@ function PublishedPage() {
 function TargetChip({ target }: { target: PostTarget }) {
   const url = targetUrl(target.platform, target.external_urn);
   const failed = target.status === "failed";
+  const skipped = target.status === "skipped";
   const label = PLATFORM_LABEL[target.platform];
 
   const inner = (
@@ -259,6 +269,8 @@ function TargetChip({ target }: { target: PostTarget }) {
       {label}
       {failed ? (
         <span className="text-status-failed">· failed</span>
+      ) : skipped ? (
+        <span className="text-ink-lo">· manual</span>
       ) : url ? (
         <span aria-hidden>↗</span>
       ) : (
@@ -273,7 +285,7 @@ function TargetChip({ target }: { target: PostTarget }) {
       ? "border-status-failed/40 text-status-failed"
       : "border-border text-ink-mid");
 
-  if (url && !failed) {
+  if (url && !failed && !skipped) {
     return (
       <a
         href={url}
@@ -287,7 +299,16 @@ function TargetChip({ target }: { target: PostTarget }) {
     );
   }
   return (
-    <span title={failed ? (target.error ?? "Publish failed") : label} className={base}>
+    <span
+      title={
+        failed
+          ? (target.error ?? "Publish failed")
+          : skipped
+            ? "Not published via API — posted by hand"
+            : label
+      }
+      className={base}
+    >
       {inner}
     </span>
   );

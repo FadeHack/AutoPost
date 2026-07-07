@@ -71,6 +71,19 @@ class Settings(BaseSettings):
     INSTAGRAM_API_VERSION: str = "v21.0"
     PLATFORM_INSTAGRAM_ENABLED: bool = False
 
+    # X / Twitter (X API v2 — OAuth 2.0 Authorization Code + PKCE, single fixed
+    # app). PAID API: no free tier for new developers as of 2026 (~$0.015/post).
+    # Confidential client → token endpoint uses HTTP Basic auth (client_id:secret).
+    # Access tokens are short-lived (~2h) with a rotating refresh token via the
+    # `offline.access` scope, so the publisher refreshes proactively.
+    # `media.write` is required for v2 media upload; `tweet.write` for posting.
+    # PLATFORM_X_ENABLED stays false until the operator provisions a paid X app.
+    X_CLIENT_ID: str = ""
+    X_CLIENT_SECRET: str = ""
+    X_REDIRECT_URI: str = "http://127.0.0.1:8000/api/v1/auth/x/callback"
+    X_SCOPES: str = "tweet.read tweet.write users.read media.write offline.access"
+    PLATFORM_X_ENABLED: bool = False
+
     # Reddit
     REDDIT_CLIENT_ID: str = ""
     REDDIT_CLIENT_SECRET: str = ""

@@ -29,7 +29,8 @@ export type Platform =
   | "bluesky"
   | "mastodon"
   | "threads"
-  | "instagram";
+  | "instagram"
+  | "x";
 
 export const CATEGORY_LABEL: Record<PostCategory, string> = {
   founder_insight: "Founder insight",
@@ -63,6 +64,7 @@ export const PLATFORM_LABEL: Record<Platform, string> = {
   mastodon: "Mastodon",
   threads: "Threads",
   instagram: "Instagram",
+  x: "X",
 };
 
 // Mirrors each backend Publisher.char_limit exactly — keep in sync.
@@ -72,4 +74,5 @@ export const PLATFORM_LIMITS: Record<Platform, number> = {
   mastodon: 500,
   threads: 500,
   instagram: 2200,
+  x: 280,
 };

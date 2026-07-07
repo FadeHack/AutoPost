@@ -172,9 +172,20 @@ export default function PlatformPreview({
   const cap = PLATFORM_LIMITS[activePlatform];
   const overCap = text.length > cap;
 
+  const [copied, setCopied] = useState(false);
+  const copyText = async () => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      /* clipboard blocked — the operator can still select the preview text */
+    }
+  };
+
   return (
     <div className="space-y-3">
-      <div className="flex flex-wrap gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         {effectiveTargets.map((t) => (
           <PlatformTab
             key={t.platform}
@@ -183,6 +194,14 @@ export default function PlatformPreview({
             onClick={() => setActive(t.platform)}
           />
         ))}
+        <button
+          type="button"
+          onClick={copyText}
+          title="Copy this platform's text for manual pasting"
+          className="ml-auto rounded-md border border-border px-2.5 py-1 text-xs text-ink-mid hover:bg-surface-1 hover:text-ink-hi"
+        >
+          {copied ? "Copied ✓" : "Copy text"}
+        </button>
       </div>
 
       {activePlatform === "linkedin" ? (
@@ -214,7 +233,7 @@ export default function PlatformPreview({
           handleAccent={
             activePlatform === "mastodon"
               ? "text-violet-400"
-              : activePlatform === "threads"
+              : activePlatform === "threads" || activePlatform === "x"
                 ? "text-zinc-400"
                 : "text-sky-400"
           }

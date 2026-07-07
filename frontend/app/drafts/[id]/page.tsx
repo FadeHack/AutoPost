@@ -31,7 +31,12 @@ import {
   type PostStatus,
 } from "@/lib/domain";
 
-type TargetStatus = "pending" | "publishing" | "published" | "failed";
+type TargetStatus =
+  | "pending"
+  | "publishing"
+  | "published"
+  | "failed"
+  | "skipped";
 
 type PostExtracts = {
   pull_quote: string | null;
@@ -130,6 +135,7 @@ const TARGET_STATUS_TONE: Record<TargetStatus, string> = {
   publishing: "text-status-publishing",
   published: "text-status-published",
   failed: "text-status-failed",
+  skipped: "text-ink-lo",
 };
 
 type Working = { hook: string; body: string; tags: string[] };
@@ -138,6 +144,34 @@ function arrayEqual(a: string[], b: string[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
+}
+
+// Slugify a hook into a safe, short filename stem.
+function fileSlug(hook: string): string {
+  const s = hook
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 40);
+  return s || "post";
+}
+
+// Force a real download of a cross-origin image. The plain <a download> attr is
+// ignored for cross-origin URLs (our assets live on the public Supabase CDN), so
+// we fetch the bytes into a blob and save that. Used for manual pasting into
+// platforms we don't publish to via API (e.g. X when not connected).
+async function downloadImage(url: string, filename: string): Promise<void> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`download failed: ${res.status}`);
+  const blob = await res.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = objectUrl;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(objectUrl);
 }
 
 function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
@@ -500,6 +534,19 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const templateNameById = (tid: string): string =>
     templates.find((t) => t.id === tid)?.name ?? tid.slice(0, 8);
 
+  // Save a rendered asset to disk for manual pasting (e.g. into X when we don't
+  // publish via API). Filename = brand + hook slug + optional slide index.
+  const downloadAsset = async (asset: GeneratedAsset, slide?: number) => {
+    const ext = asset.image_path.toLowerCase().endsWith(".jpg") ? "jpg" : "png";
+    const stem = fileSlug(post?.hook ?? "post");
+    const name = slide ? `${stem}-slide-${slide}.${ext}` : `${stem}.${ext}`;
+    try {
+      await downloadImage(asset.image_url, `nestwhirr-${name}`);
+    } catch {
+      notify({ tone: "error", title: "Download failed", body: "Try 'full size' and save manually." });
+    }
+  };
+
   // The most recent carousel batch — front-of-list cluster of `carousel_slide`
   // assets rendered close together in time.
   const currentCarousel = useMemo<GeneratedAsset[]>(() => {
@@ -688,8 +735,15 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
                   title={t.error ?? t.external_urn ?? t.status}
                 >
                   <PlatformBadge platform={t.platform} />
-                  <span className={"capitalize " + TARGET_STATUS_TONE[t.status]}>
-                    {t.status}
+                  <span
+                    className={"capitalize " + TARGET_STATUS_TONE[t.status]}
+                    title={
+                      t.status === "skipped"
+                        ? "Not published via API — post this one by hand"
+                        : undefined
+                    }
+                  >
+                    {t.status === "skipped" ? "manual" : t.status}
                   </span>
                 </li>
               ))}
@@ -790,7 +844,15 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
               className="underline hover:text-ink-mid"
             >
               full size
-            </a>
+            </a>{" "}
+            ·{" "}
+            <button
+              type="button"
+              onClick={() => downloadAsset(latest)}
+              className="underline hover:text-ink-mid"
+            >
+              download
+            </button>
           </p>
         )}
         {renderError && (
@@ -806,7 +868,7 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
             </p>
             <ul className="grid grid-cols-4 gap-1.5">
               {currentCarousel.map((a, idx) => (
-                <li key={a.id}>
+                <li key={a.id} className="space-y-1">
                   <a href={a.image_url} target="_blank" rel="noopener noreferrer">
                     {/* eslint-disable-next-line @next/next/no-img-element */}
                     <img
@@ -815,6 +877,13 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
                       className="block aspect-square w-full rounded border border-border bg-black hover:border-ink-lo"
                     />
                   </a>
+                  <button
+                    type="button"
+                    onClick={() => downloadAsset(a, idx + 1)}
+                    className="block w-full text-center text-[10px] text-ink-lo underline hover:text-ink-mid"
+                  >
+                    download
+                  </button>
                 </li>
               ))}
             </ul>

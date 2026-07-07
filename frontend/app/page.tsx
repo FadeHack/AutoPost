@@ -93,7 +93,7 @@ function Today() {
   const [now] = useState(() => Date.now());
 
   // OAuth callbacks redirect here with ?<platform>=connected|error.
-  const platformResult = (["linkedin", "mastodon", "threads", "instagram"] as const)
+  const platformResult = (["linkedin", "mastodon", "threads", "instagram", "x"] as const)
     .map((p) => ({ platform: p, value: searchParams.get(p) }))
     .find((r) => r.value);
   const callbackMessage = searchParams.get("message");
