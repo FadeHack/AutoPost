@@ -108,6 +108,10 @@ class PublishingStatus(str, enum.Enum):
 class RenderKind(str, enum.Enum):
     template = "template"
     ai_image = "ai_image"
+    # Operator-uploaded custom image. Raw passthrough — no Playwright render,
+    # no template (template_id is NULL for these rows), posted exactly as
+    # uploaded. See app/api/posts.py :: upload_image.
+    upload = "upload"
 
 
 class Platform(str, enum.Enum):

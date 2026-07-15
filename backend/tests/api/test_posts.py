@@ -5,7 +5,42 @@ matching the pattern used elsewhere in this repo (renderer, generator). Here
 we only test the small bits of pure logic that have non-trivial branching."""
 from __future__ import annotations
 
-from app.api.posts import MAX_TAG_LENGTH, MAX_TAGS, normalize_tags
+import base64
+
+import pytest
+
+from app.api.posts import (
+    MAX_TAG_LENGTH,
+    MAX_TAGS,
+    _image_dimensions,
+    normalize_tags,
+)
+
+# 1x1 pixel images, base64-encoded, one per supported upload format.
+_PNG_1x1 = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M8AAAMBAQDJ/pLvAAAAAElFTkSuQmCC"
+)
+_GIF_1x1 = base64.b64decode("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+_JPEG_10x10 = base64.b64decode(
+    "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRof"
+    "Hh0aHBwgJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAAKAAoBAREA/8QAFAAB"
+    "AAAAAAAAAAAAAAAAAAAACf/EABQQAQAAAAAAAAAAAAAAAAAAAAD/2gAIAQEAAT8AH//Z"
+)
+
+
+class TestImageDimensions:
+    def test_png(self) -> None:
+        assert _image_dimensions(_PNG_1x1) == (1, 1)
+
+    def test_gif(self) -> None:
+        assert _image_dimensions(_GIF_1x1) == (1, 1)
+
+    def test_jpeg_scans_to_sof_marker(self) -> None:
+        assert _image_dimensions(_JPEG_10x10) == (10, 10)
+
+    def test_unrecognized_bytes_raise(self) -> None:
+        with pytest.raises(ValueError):
+            _image_dimensions(b"not an image at all")
 
 
 class TestNormalizeTags:

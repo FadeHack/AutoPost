@@ -19,10 +19,13 @@ class GeneratedAsset(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    template_id: Mapped[uuid.UUID] = mapped_column(
+    # NULL only for operator-uploaded images (render_kind='upload'): a raw
+    # passthrough has no HTML template. Every rendered row (template / ai_image)
+    # still carries a valid template_id FK.
+    template_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("templates.id", ondelete="RESTRICT"),
-        nullable=False,
+        nullable=True,
     )
     # Path on disk (dev) or object-storage key (when deployed).
     image_path: Mapped[str] = mapped_column(String(2048), nullable=False)

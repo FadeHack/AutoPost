@@ -22,7 +22,7 @@ import { Banner } from "@/components/ui/Banner";
 import { ActionBar, ActionButton } from "@/components/ui/ActionBar";
 import { VoiceQualityChip } from "@/components/ui/VoiceQualityChip";
 import { useToast } from "@/components/ui/Toast";
-import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { ApiError, apiDelete, apiGet, apiPatch, apiPost, apiUpload } from "@/lib/api";
 import { scanVoiceTells } from "@/lib/voice";
 import {
   PLATFORM_LABEL,
@@ -100,7 +100,7 @@ type PublishingLog = {
   attempted_at: string;
 };
 
-type RenderKind = "template" | "ai_image";
+type RenderKind = "template" | "ai_image" | "upload";
 
 // How much brand chrome wraps an AI image: full brand card, full-bleed with a
 // small corner mark, or full-bleed with no chrome. Mirrors RenderRequest.frame.
@@ -115,7 +115,7 @@ const AI_IMAGE_FRAMES: { value: AIImageFrame; label: string }[] = [
 type GeneratedAsset = {
   id: string;
   post_id: string;
-  template_id: string;
+  template_id: string | null;
   image_path: string;
   width: number;
   height: number;
@@ -198,6 +198,8 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
   const [rendering, setRendering] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const uploadInputRef = useRef<HTMLInputElement>(null);
   const [saving, setSaving] = useState(false);
   const [approving, setApproving] = useState(false);
   const [scheduling, setScheduling] = useState(false);
@@ -531,8 +533,34 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
     }
   }, [id, selectedTemplateId, isAIImageRender, isCarouselRender, frame, post]);
 
-  const templateNameById = (tid: string): string =>
-    templates.find((t) => t.id === tid)?.name ?? tid.slice(0, 8);
+  // Custom-image upload: raw passthrough — the file becomes the newest asset
+  // and publishes exactly as uploaded (no template, no render).
+  const uploadCustomImage = useCallback(
+    async (file: File) => {
+      setUploading(true);
+      setRenderError("");
+      try {
+        const form = new FormData();
+        form.append("file", file);
+        const asset = await apiUpload<GeneratedAsset>(
+          `/posts/${id}/upload-image`,
+          form,
+        );
+        setAssets((prev) => [asset, ...prev]);
+      } catch (e) {
+        setRenderError(e instanceof ApiError ? e.body : (e as Error).message);
+      } finally {
+        setUploading(false);
+        if (uploadInputRef.current) uploadInputRef.current.value = "";
+      }
+    },
+    [id],
+  );
+
+  const templateNameById = (tid: string | null): string =>
+    tid === null
+      ? "Uploaded image"
+      : (templates.find((t) => t.id === tid)?.name ?? tid.slice(0, 8));
 
   // Save a rendered asset to disk for manual pasting (e.g. into X when we don't
   // publish via API). Filename = brand + hook slug + optional slide index.
@@ -828,11 +856,35 @@ function DraftDetailPage({ params }: { params: Promise<{ id: string }> }) {
                 : "Render"}
         </ActionButton>
 
+        {/* Custom image upload — raw passthrough, posts exactly as uploaded */}
+        <input
+          ref={uploadInputRef}
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          className="hidden"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) uploadCustomImage(f);
+          }}
+        />
+        <ActionButton
+          onClick={() => uploadInputRef.current?.click()}
+          loading={uploading}
+          variant="secondary"
+        >
+          Upload custom image
+        </ActionButton>
+
         {latest && (
           <p className="text-[11px] text-ink-lo">
             {latest.render_kind === "ai_image" && (
               <span className="mr-1 rounded border border-status-scheduled/40 px-1 py-0.5 text-[9px] uppercase tracking-wider text-status-scheduled">
                 AI
+              </span>
+            )}
+            {latest.render_kind === "upload" && (
+              <span className="mr-1 rounded border border-ink-lo/40 px-1 py-0.5 text-[9px] uppercase tracking-wider text-ink-lo">
+                Uploaded
               </span>
             )}
             {templateNameById(latest.template_id)} · {latest.width}×

@@ -16,9 +16,18 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Any, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    Response,
+    UploadFile,
+    status,
+)
 from pydantic import BaseModel, ConfigDict, Field, computed_field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -658,7 +667,9 @@ class GeneratedAssetRead(BaseModel):
 
     id: UUID
     post_id: UUID
-    template_id: UUID
+    # NULL for operator-uploaded images (render_kind='upload'); a valid FK for
+    # every rendered row.
+    template_id: UUID | None
     image_path: str
     width: int
     height: int
@@ -725,6 +736,140 @@ async def render_carousel(
             status_code=status.HTTP_400_BAD_REQUEST, detail=str(e)
         )
     return [GeneratedAssetRead.model_validate(a) for a in assets]
+
+
+# Operator uploads post exactly as-is (raw passthrough) — accept the common web
+# image types. The Supabase bucket's MIME allow-list must include each of these
+# (see INSTRUCTIONS.md); `image/jpeg` was already added for AI images.
+_UPLOAD_CONTENT_TYPES: dict[str, str] = {
+    "image/png": "png",
+    "image/jpeg": "jpg",
+    "image/webp": "webp",
+    "image/gif": "gif",
+}
+# Matches the Supabase free-tier object cap (renders already respect this).
+_UPLOAD_MAX_BYTES = 5 * 1024 * 1024
+
+
+def _image_dimensions(data: bytes) -> tuple[int, int]:
+    """Read (width, height) from image bytes by parsing the format header only.
+
+    Supports PNG / JPEG / GIF / WebP (VP8/VP8L/VP8X) — the formats we accept on
+    upload — without pulling in Pillow. Publishers don't consume these values,
+    but the columns are NOT NULL, so we record the real size. Raises ValueError
+    if the bytes aren't a recognizable image of a supported type.
+    """
+    # PNG: 8-byte sig, then IHDR with width/height as big-endian u32 at 16..24.
+    if data[:8] == b"\x89PNG\r\n\x1a\n" and len(data) >= 24:
+        w = int.from_bytes(data[16:20], "big")
+        h = int.from_bytes(data[20:24], "big")
+        return w, h
+    # GIF: 'GIF87a'/'GIF89a', then width/height as little-endian u16.
+    if data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        w = int.from_bytes(data[6:8], "little")
+        h = int.from_bytes(data[8:10], "little")
+        return w, h
+    # WebP: 'RIFF'....'WEBP' then a VP8/VP8L/VP8X chunk.
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP" and len(data) >= 30:
+        fmt = data[12:16]
+        if fmt == b"VP8 ":  # lossy
+            w = int.from_bytes(data[26:28], "little") & 0x3FFF
+            h = int.from_bytes(data[28:30], "little") & 0x3FFF
+            return w, h
+        if fmt == b"VP8L":  # lossless
+            b0, b1, b2, b3 = data[21], data[22], data[23], data[24]
+            w = ((b1 & 0x3F) << 8 | b0) + 1
+            h = ((b3 & 0x0F) << 10 | b2 << 2 | (b1 & 0xC0) >> 6) + 1
+            return w, h
+        if fmt == b"VP8X":  # extended: 24-bit dims at 24..30, +1
+            w = int.from_bytes(data[24:27], "little") + 1
+            h = int.from_bytes(data[27:30], "little") + 1
+            return w, h
+    # JPEG: scan segments for a Start-Of-Frame marker carrying the dimensions.
+    if data[:2] == b"\xff\xd8":
+        i = 2
+        n = len(data)
+        while i + 9 < n:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            # SOF0..SOF15 (excluding the non-SOF 0xC4/0xC8/0xCC) carry size.
+            if marker in (
+                0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF,
+            ):
+                h = int.from_bytes(data[i + 5 : i + 7], "big")
+                w = int.from_bytes(data[i + 7 : i + 9], "big")
+                return w, h
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2  # standalone markers, no length field
+                continue
+            seg_len = int.from_bytes(data[i + 2 : i + 4], "big")
+            if seg_len < 2:
+                break
+            i += 2 + seg_len
+    raise ValueError("could not read image dimensions from uploaded file")
+
+
+@router.post("/{post_id}/upload-image", response_model=GeneratedAssetRead)
+async def upload_image(
+    post_id: UUID,
+    file: UploadFile = File(...),
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> GeneratedAssetRead:
+    """Attach an operator-uploaded custom image to a post as a GeneratedAsset.
+
+    Raw passthrough: the bytes are stored in the same public bucket and posted
+    exactly as uploaded (no template, no render). The resulting asset flows
+    through publishing identically to a rendered one.
+    """
+    post = await session.get(Post, post_id)
+    if post is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="post not found")
+
+    ext = _UPLOAD_CONTENT_TYPES.get((file.content_type or "").lower())
+    if ext is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"unsupported image type {file.content_type!r}; "
+            f"accepted: {', '.join(sorted(_UPLOAD_CONTENT_TYPES))}",
+        )
+
+    data = await file.read()
+    if not data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="empty file"
+        )
+    if len(data) > _UPLOAD_MAX_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"image exceeds {_UPLOAD_MAX_BYTES // (1024 * 1024)} MB limit",
+        )
+
+    try:
+        width, height = _image_dimensions(data)
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+    asset_id = uuid4()
+    key = f"{post_id}/{asset_id}.{ext}"
+    await storage.upload_image(key, data, content_type=file.content_type)
+
+    asset = GeneratedAsset(
+        id=asset_id,
+        post_id=post_id,
+        template_id=None,
+        image_path=key,
+        width=width,
+        height=height,
+        render_kind=RenderKind.upload,
+    )
+    session.add(asset)
+    await session.commit()
+    await session.refresh(asset)
+    return GeneratedAssetRead.model_validate(asset)
 
 
 @router.get("/{post_id}/targets", response_model=list[PostTargetRead])

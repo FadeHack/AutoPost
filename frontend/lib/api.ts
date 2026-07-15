@@ -38,6 +38,19 @@ export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   return (await r.json()) as T;
 }
 
+// Multipart upload (e.g. a custom image). Does NOT set Content-Type — the
+// browser fills in the multipart boundary itself when the body is FormData.
+export async function apiUpload<T>(path: string, form: FormData): Promise<T> {
+  const headers = await authHeader();
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers,
+    body: form,
+  });
+  if (!r.ok) throw new ApiError(r.status, await r.text());
+  return (await r.json()) as T;
+}
+
 export async function apiPatch<T>(path: string, body?: unknown): Promise<T> {
   const headers = await authHeader();
   const r = await fetch(`${API_BASE}${path}`, {
