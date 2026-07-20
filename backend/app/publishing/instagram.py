@@ -235,13 +235,14 @@ class InstagramPublisher(Publisher):
 
 
 async def load_account(
-    session: AsyncSession, post: Post  # noqa: ARG001 — parity with other loaders
+    session: AsyncSession, post: Post
 ) -> InstagramAccount:
     from sqlalchemy import select
 
     row = (
         await session.execute(
             select(InstagramAccount)
+            .where(InstagramAccount.workspace_id == post.workspace_id)
             .order_by(InstagramAccount.created_at.desc())
             .limit(1)
         )

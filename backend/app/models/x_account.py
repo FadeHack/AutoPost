@@ -45,6 +45,13 @@ class XAccount(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    # Tenant boundary (Phase 14). Scoping key for this connected account.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     # Numeric X user id from GET /2/users/me. Stable identity for the account.
     x_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
     # Public @username, resolved at connect time. Used to build the public

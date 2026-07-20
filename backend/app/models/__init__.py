@@ -1,8 +1,10 @@
 """All ORM models. Importing this module registers every table on `Base.metadata`."""
 
+from app.models.access_request import AccessRequest
 from app.models.ai_generation import AIGeneration
 from app.models.analytics import AnalyticsSnapshot
 from app.models.base import (
+    AccessRequestStatus,
     AccountKind,
     Base,
     Platform,
@@ -28,11 +30,13 @@ from app.models.publishing_log import PublishingLog
 from app.models.template import Template
 from app.models.trend import Trend
 from app.models.user import User
+from app.models.workspace import Workspace
 from app.models.x_account import XAccount
 
 __all__ = [
     "Base",
     "TimestampMixin",
+    "AccessRequestStatus",
     "AccountKind",
     "Platform",
     "PostCategory",
@@ -43,6 +47,8 @@ __all__ = [
     "TrendSource",
     "UserRole",
     "User",
+    "Workspace",
+    "AccessRequest",
     "LinkedInAccount",
     "BlueskyAccount",
     "MastodonAccount",

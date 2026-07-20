@@ -193,13 +193,16 @@ class XPublisher(Publisher):
 
 
 async def load_account(
-    session: AsyncSession, post: Post  # noqa: ARG001 — parity with other loaders
+    session: AsyncSession, post: Post
 ) -> XAccount:
     from sqlalchemy import select
 
     row = (
         await session.execute(
-            select(XAccount).order_by(XAccount.created_at.desc()).limit(1)
+            select(XAccount)
+            .where(XAccount.workspace_id == post.workspace_id)
+            .order_by(XAccount.created_at.desc())
+            .limit(1)
         )
     ).scalars().first()
     if row is None:

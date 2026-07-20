@@ -90,6 +90,9 @@ async def callback(
     import uuid as _uuid
 
     user_uuid = _uuid.UUID(user_id)
+    db_user = await session.get(User, user_uuid)
+    if db_user is None:
+        return RedirectResponse(f"{frontend}/?linkedin=error&message=unknown_user", 302)
     existing = await session.execute(
         select(LinkedInAccount).where(
             LinkedInAccount.user_id == user_uuid,
@@ -101,6 +104,7 @@ async def callback(
     if account is None:
         account = LinkedInAccount(
             user_id=user_uuid,
+            workspace_id=db_user.workspace_id,
             account_kind=AccountKind.personal,
         )
         session.add(account)

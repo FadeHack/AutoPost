@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
+import { useMe } from "@/lib/useMe";
 import { BrandSwitcher } from "./BrandSwitcher";
 import { TokenHealthPill } from "./TokenHealthPill";
 
@@ -29,6 +30,7 @@ function GearGlyph() {
 
 export function MobileTopBar() {
   const { session, signOut } = useAuth();
+  const { me } = useMe();
   const [menu, setMenu] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
@@ -76,6 +78,15 @@ export function MobileTopBar() {
         {menu && (
           <div className="absolute right-0 top-full z-50 mt-1 w-52 overflow-hidden rounded-md border border-border bg-surface-1 shadow-2xl shadow-black/60">
             <div className="truncate px-3 py-2 text-xs text-ink-lo">{email}</div>
+            {me?.role === "admin" && (
+              <Link
+                href="/admin"
+                onClick={() => setMenu(false)}
+                className="block border-t border-border px-3 py-2 text-left text-sm text-ink-mid transition-colors hover:bg-surface-2 hover:text-ink-hi"
+              >
+                Admin
+              </Link>
+            )}
             <button
               onClick={signOut}
               className="w-full border-t border-border px-3 py-2 text-left text-sm text-ink-mid transition-colors hover:bg-surface-2 hover:text-ink-hi"

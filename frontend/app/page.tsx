@@ -1,10 +1,11 @@
 "use client";
 
 import { Suspense, useCallback, useEffect, useState } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "@/components/auth-provider";
 import { Banner } from "@/components/ui/Banner";
+import Landing from "@/components/marketing/Landing";
 import { ApiError, apiGet } from "@/lib/api";
 import { tokenExpiry } from "@/lib/tokenExpiry";
 import type { PostCategory, PostStatus } from "@/lib/domain";
@@ -77,7 +78,6 @@ const SOURCE_LABEL: Record<Trend["source"], string> = {
 };
 
 function Today() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const { session, loading: authLoading } = useAuth();
 
@@ -98,10 +98,6 @@ function Today() {
     .find((r) => r.value);
   const callbackMessage = searchParams.get("message");
   const [callbackDismissed, setCallbackDismissed] = useState(false);
-
-  useEffect(() => {
-    if (!authLoading && !session) router.replace("/login");
-  }, [authLoading, session, router]);
 
   useEffect(() => {
     if (!session) return;
@@ -380,10 +376,22 @@ function Counter({
   );
 }
 
-export default function HomePage() {
+// Root gate: logged-out visitors get the marketing landing (Phase 14 Chunk H);
+// signed-in operators get Today. AppShell renders the landing bare (no rail),
+// since it only mounts the rail when a session exists.
+function HomeGate() {
+  const { session, loading } = useAuth();
+  if (loading) {
+    return <main className="flex-1 p-8 text-ink-lo">Loading…</main>;
+  }
+  if (!session) return <Landing />;
   return (
     <Suspense fallback={<main className="flex-1 p-8 text-ink-lo">Loading…</main>}>
       <Today />
     </Suspense>
   );
+}
+
+export default function HomePage() {
+  return <HomeGate />;
 }

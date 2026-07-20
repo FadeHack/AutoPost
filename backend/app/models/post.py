@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum as SAEnum, String
+from sqlalchemy import DateTime, Enum as SAEnum, ForeignKey, String
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -27,6 +27,13 @@ class Post(Base, TimestampMixin):
     __tablename__ = "posts"
 
     id: Mapped[uuid.UUID] = uuid_pk()
+    # Tenant boundary (Phase 14). Every post belongs to exactly one workspace.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     category: Mapped[PostCategory] = mapped_column(
         SAEnum(PostCategory, name="post_category"),
         nullable=False,

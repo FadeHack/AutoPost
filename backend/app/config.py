@@ -96,6 +96,14 @@ class Settings(BaseSettings):
     TIMEZONE: str = "UTC"
     LOG_LEVEL: str = "INFO"
 
+    # Access control (Phase 14). Invite-only: the backend rejects any authenticated
+    # email that isn't already provisioned in the `users` table, EXCEPT the bootstrap
+    # admins below — the first-run super-admins who get the /admin panel and can then
+    # invite everyone else. Comma-separated, case-insensitive. Keep this list tiny.
+    # (The matching Supabase Auth user must exist before they can sign in — create it
+    # via the Supabase dashboard, since public signups are disabled. See INSTRUCTIONS.md.)
+    BOOTSTRAP_ADMIN_EMAILS: str = "nestwhirr@gmail.com"
+
     # Scheduler
     RETRIEVAL_CRON: str = "0 */6 * * *"
     ANALYTICS_CRON: str = "0 * * * *"
@@ -127,6 +135,10 @@ class Settings(BaseSettings):
     @property
     def linkedin_scope_list(self) -> list[str]:
         return [s.strip() for s in self.LINKEDIN_SCOPES.split(",") if s.strip()]
+
+    @property
+    def bootstrap_admin_email_set(self) -> set[str]:
+        return {e.strip().lower() for e in self.BOOTSTRAP_ADMIN_EMAILS.split(",") if e.strip()}
 
 
 settings = Settings()

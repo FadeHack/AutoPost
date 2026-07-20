@@ -103,6 +103,9 @@ async def callback(
         )
 
     user_uuid = _uuid.UUID(decoded.user_id)
+    db_user = await session.get(User, user_uuid)
+    if db_user is None:
+        return RedirectResponse(f"{frontend}/?threads=error&message=unknown_user", 302)
     existing = (
         await session.execute(
             select(ThreadsAccount).where(
@@ -115,6 +118,7 @@ async def callback(
     if existing is None:
         existing = ThreadsAccount(
             user_id=user_uuid,
+            workspace_id=db_user.workspace_id,
             threads_user_id=profile.threads_user_id,
             username=profile.username,
         )

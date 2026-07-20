@@ -406,12 +406,12 @@ class _Session:
 
 async def test_load_account_returns_latest():
     acc = _account()
-    assert await ig.load_account(_Session(acc), post=None) is acc
+    assert await ig.load_account(_Session(acc), post=SimpleNamespace(workspace_id=uuid4())) is acc
 
 
 async def test_load_account_raises_when_none():
     with pytest.raises(PermanentPublishError):
-        await ig.load_account(_Session(None), post=None)
+        await ig.load_account(_Session(None), post=SimpleNamespace(workspace_id=uuid4()))
 
 
 def test_publish_errors_are_publisherror_subclasses():

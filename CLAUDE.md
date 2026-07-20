@@ -46,6 +46,7 @@ Do not swap these without explicit user approval.
 ## Architectural Rules
 
 - Subsystems live under `backend/app/{retrieval,intelligence,rendering,scheduler,publishing,analytics}` and **communicate via the database or in-process function calls — never HTTP between subsystems**.
+- **Tenant isolation (Phase 14).** The tool is invite-only + per-workspace multi-tenant. Every PRIVATE row (posts + all downstream + the 6 social-account tables) carries a NOT-NULL `workspace_id`; SHARED rows (trends, prompts, templates) do not. **Any new private table or write must set `workspace_id`; any id-based fetch must filter by the caller's workspace and return 404 (never 403) on a mismatch** — no existence leak. Invited users default to role `editor`, never `admin`; only `BOOTSTRAP_ADMIN_EMAILS` self-provision as admin. Do not add auth-bypassing routes except the public `POST /access-requests` and the OAuth callbacks.
 - A new **retrieval source** → implement the `Fetcher` ABC in `backend/app/retrieval/base.py`. One file.
 - A new **publishing target** → implement the `Publisher` ABC in `backend/app/publishing/`. MVP only implements `LinkedInPublisher`.
 - **Prompts live in the `prompts` table** (versioned). Do not hardcode prompt strings in Python — load by name+version from the DB.
@@ -67,8 +68,9 @@ These are deferred — do not pull them forward without explicit user approval.
 - Vector DB / RAG, fine-tuned voice models
 - Multi-platform posting code (Twitter, Threads, etc.) — abstractions support it, implementations do not
 - Autonomous agents, AI comment replies, competitor analysis
-- Team collaboration / multi-tenant logic beyond the existing `org_urn` column
 - Diffusion image generation as the primary visual path
+
+> **Lifted 2026-07-19 (user-approved):** "Team collaboration / multi-tenant logic beyond the existing `org_urn` column" was on this list. Phase 14 turned the tool invite-only with **isolated per-workspace multi-tenancy** — every private row (posts + downstream + the 6 social-account tables) is scoped by `workspace_id`; trends/prompts/templates stay shared. One user per workspace today, but the seam is team-ready. Full rationale in `CONTEXT.md → Decisions made → 2026-07-19`. Do not re-forbid it.
 
 ---
 

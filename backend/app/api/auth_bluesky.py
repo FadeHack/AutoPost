@@ -93,6 +93,7 @@ async def connect(
         session.add(
             BlueskyAccount(
                 user_id=user.id,
+                workspace_id=user.workspace_id,
                 handle=body.handle,
                 did=did,
                 app_password=encrypt(body.app_password),

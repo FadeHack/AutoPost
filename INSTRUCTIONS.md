@@ -105,6 +105,57 @@ Dashboard: http://localhost:3000
 
 ---
 
+## Invite-only access (Phase 14 Chunk A)
+
+The tool is invite-only. Two one-time setup steps + how the gate works.
+
+**1. Disable public signups in Supabase (required — otherwise anyone can self-provision):**
+1. Supabase dashboard → your project → **Authentication** → **Sign In / Providers** (a.k.a. Providers/Settings) → **Email**.
+2. Turn **OFF** "Allow new users to sign up" (the *Allow signups* / *Enable sign ups* toggle).
+   - The frontend login already sends `shouldCreateUser: false`, but this dashboard toggle is the real server-side gate — set both.
+
+**2. Create the bootstrap admin's Supabase user (they can't self-sign-up now):**
+- The bootstrap admin email is `BOOTSTRAP_ADMIN_EMAILS` in `backend/.env` (default `nestwhirr@gmail.com`; comma-separated, case-insensitive).
+- Because signups are off, create their auth user manually: Supabase dashboard → **Authentication** → **Users** → **Add user** → **Send invitation** (or *Create new user*) with that email.
+- On their first magic-link sign-in the backend JIT-provisions the `users` row as `role=admin`. Everyone else is denied (403) until invited via the `/admin` panel (lands in Chunk F).
+
+**3. Set `SUPABASE_SERVICE_ROLE_KEY` in `backend/.env` (required for the admin panel):**
+- The admin approve/invite flow calls Supabase's admin API (`invite_user_by_email`), which needs the **service_role** key — not the anon key.
+- Supabase dashboard → **Project Settings → API → Project API keys → `service_role`** (secret). Paste into `backend/.env` as `SUPABASE_SERVICE_ROLE_KEY=...`. Never expose it to the frontend (it bypasses RLS).
+
+**How the gate behaves now:**
+- A valid Supabase token whose email is **not** already in `users` **and** not a bootstrap admin → backend returns **403** (`access is invite-only…`).
+- Bootstrap admins are the only self-provisioning path; they always heal back to `admin` even if demoted.
+- Every private row is scoped to a **workspace** (one workspace per user today). Approving a request provisions the `users` row **and** its `workspaces` row, keyed on the Supabase UUID, so first-login JIT recognizes the invitee.
+- `GET /api/v1/me` → `{id, email, role, workspace_id}` (frontend uses `role` to gate the admin UI).
+
+### Running the admin panel (`/admin`)
+
+Once a bootstrap admin is signed in, everything is UI-driven — no dashboard round-trips:
+
+1. Sign in as a bootstrap admin → the left rail shows an **Admin** entry (admins only).
+2. `/admin?tab=requests` — the **pending access-request queue**. Each row: **Approve** (sends the Supabase invite email, provisions the user+workspace as `editor`, stamps the request `approved`) or **Deny** (audit-stamps `denied`, no email).
+3. `/admin?tab=users` — the **Users table**. Change a user's role via the `<select>` (PATCH; blocked from demoting the last admin → 409), or **Revoke** (DELETE — hard-deletes the local user + workspace + their posts/accounts; self-revoke and last-admin revoke are blocked). The Supabase Auth identity survives a revoke, but JIT will deny it on next login until re-invited.
+
+**Direct invite (skip the request form):** `/admin?tab=users` → **Invite user** → email. Same as approving a request. Duplicate email → 409.
+
+### Testing the approve flow without waiting for a real request
+
+The public form posts to `POST /access-requests` (no auth) — seed a pending request with a real inbox you control, then approve it in the UI:
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/v1/access-requests \
+  -H "Content-Type: application/json" \
+  -d '{"email":"you+invitee@gmail.com","name":"Test Invitee","reason":"smoke test"}'
+# → 202 {"ok":true}  (always 202, even on honeypot/dupe — opaque by design)
+```
+
+Then `/admin?tab=requests` → **Approve** → the invite email lands in that inbox. Use a **real deliverable address** — Supabase rejects `@example.com` and other invalid domains with a 400 that surfaces as a 502 + toast in the UI.
+
+> **Note:** the approve→`invite_user_by_email` path is mocked in the test suite (no network). The first real approve should be smoke-tested by an admin against a disposable-but-deliverable inbox.
+
+---
+
 ## Connecting LinkedIn (one-time)
 
 1. Sign into the dashboard via Supabase magic link.
