@@ -32,6 +32,13 @@ class LinkedInAccount(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    # Tenant boundary (Phase 14). Scoping key for this connected account.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     account_kind: Mapped[AccountKind] = mapped_column(
         SAEnum(AccountKind, name="linkedin_account_kind"),
         nullable=False,

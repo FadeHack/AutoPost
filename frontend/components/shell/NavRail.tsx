@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState, type ReactNode } from "react";
 import { apiGet } from "@/lib/api";
+import { useMe } from "@/lib/useMe";
 
 // Navigation = a worklist (DESIGN.md §2). Badges surface "what needs me":
 // Inbox = unconsumed trends, Drafts = posts in draft/failed awaiting action.
@@ -31,6 +32,8 @@ const I = {
   settings: (
     <path d="M10 13a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM10 2v2M10 16v2M3.5 10h-2M18.5 10h-2M5 5l-1.4-1.4M16.4 16.4 15 15M5 15l-1.4 1.4M16.4 3.6 15 5" />
   ),
+  // Shield — admin-only control surface.
+  admin: <path d="M10 2.5 4 5v4.5c0 3.5 2.4 6.4 6 8 3.6-1.6 6-4.5 6-8V5l-6-2.5Z" />,
 };
 
 function Glyph({ d }: { d: ReactNode }) {
@@ -106,38 +109,64 @@ function Badge({ n }: { n: number }) {
   );
 }
 
+function RailLink({
+  item,
+  collapsed,
+  n,
+}: {
+  item: NavItem;
+  collapsed: boolean;
+  n: number;
+}) {
+  const pathname = usePathname();
+  const active = isActive(pathname, item.href);
+  return (
+    <Link
+      href={item.href}
+      title={collapsed ? item.label : undefined}
+      className={
+        "group relative flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors " +
+        (active
+          ? "bg-surface-2 text-ink-hi"
+          : "text-ink-mid hover:bg-surface-1 hover:text-ink-hi") +
+        (collapsed ? " justify-center" : "")
+      }
+    >
+      <span className={active ? "text-accent" : ""}>{item.icon}</span>
+      {!collapsed && <span className="truncate">{item.label}</span>}
+      {!collapsed && item.badge ? <Badge n={n} /> : null}
+      {collapsed && n > 0 ? (
+        <span className="absolute right-2 top-1.5 h-2 w-2 rounded-full bg-accent" />
+      ) : null}
+    </Link>
+  );
+}
+
 /** Desktop / tablet vertical rail. `collapsed` → icon-only (tablet). */
 export function NavRail({ collapsed = false }: { collapsed?: boolean }) {
-  const pathname = usePathname();
   const counts = useWorklistBadges();
+  const { me } = useMe();
 
   return (
     <nav className="flex flex-col gap-0.5">
-      {NAV.map((item) => {
-        const active = isActive(pathname, item.href);
-        const n = item.badge ? counts[item.badge] : 0;
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            title={collapsed ? item.label : undefined}
-            className={
-              "group relative flex items-center gap-3 rounded-md px-2.5 py-2 text-sm transition-colors " +
-              (active
-                ? "bg-surface-2 text-ink-hi"
-                : "text-ink-mid hover:bg-surface-1 hover:text-ink-hi") +
-              (collapsed ? " justify-center" : "")
-            }
-          >
-            <span className={active ? "text-accent" : ""}>{item.icon}</span>
-            {!collapsed && <span className="truncate">{item.label}</span>}
-            {!collapsed && item.badge ? <Badge n={n} /> : null}
-            {collapsed && n > 0 ? (
-              <span className="absolute right-2 top-1.5 h-2 w-2 rounded-full bg-accent" />
-            ) : null}
-          </Link>
-        );
-      })}
+      {NAV.map((item) => (
+        <RailLink
+          key={item.href}
+          item={item}
+          collapsed={collapsed}
+          n={item.badge ? counts[item.badge] : 0}
+        />
+      ))}
+      {me?.role === "admin" && (
+        <>
+          <div className="my-1 border-t border-border" />
+          <RailLink
+            item={{ href: "/admin", label: "Admin", icon: <Glyph d={I.admin} /> }}
+            collapsed={collapsed}
+            n={0}
+          />
+        </>
+      )}
     </nav>
   );
 }

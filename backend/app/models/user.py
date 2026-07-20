@@ -2,7 +2,7 @@ import uuid
 from typing import TYPE_CHECKING
 
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import String
+from sqlalchemy import ForeignKey, String
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from app.models.linkedin_account import LinkedInAccount
     from app.models.mastodon_account import MastodonAccount
     from app.models.threads_account import ThreadsAccount
+    from app.models.workspace import Workspace
     from app.models.x_account import XAccount
 
 
@@ -24,11 +25,23 @@ class User(Base, TimestampMixin):
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+
+    # The tenant this user belongs to (Phase 14). One user per workspace today.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="RESTRICT"),
+        nullable=False,
+        index=True,
+    )
+    # Safe-by-default: new rows are `editor`, never `admin`. Admin is granted only to
+    # bootstrap admins (config) or explicitly via the /admin panel (Phase 14).
     role: Mapped[UserRole] = mapped_column(
         SAEnum(UserRole, name="user_role"),
         nullable=False,
-        default=UserRole.admin,
+        default=UserRole.editor,
     )
+
+    workspace: Mapped["Workspace"] = relationship()
 
     linkedin_accounts: Mapped[list["LinkedInAccount"]] = relationship(
         back_populates="user",

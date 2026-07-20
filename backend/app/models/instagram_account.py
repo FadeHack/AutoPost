@@ -47,6 +47,13 @@ class InstagramAccount(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    # Tenant boundary (Phase 14). Scoping key for this connected account.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     # Instagram-scoped numeric user id from the token exchange. Used as the path
     # segment in `graph.instagram.com/{ver}/{instagram_user_id}/media`.
     instagram_user_id: Mapped[str] = mapped_column(String(255), nullable=False)

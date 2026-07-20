@@ -357,13 +357,13 @@ class _Session:
 
 async def test_load_account_returns_latest():
     acc = _account()
-    got = await mast.load_account(_Session(acc), post=None)
+    got = await mast.load_account(_Session(acc), post=SimpleNamespace(workspace_id=uuid4()))
     assert got is acc
 
 
 async def test_load_account_raises_when_none():
     with pytest.raises(PermanentPublishError):
-        await mast.load_account(_Session(None), post=None)
+        await mast.load_account(_Session(None), post=SimpleNamespace(workspace_id=uuid4()))
 
 
 # Sanity: every raised publish error is a PublishError subclass the orchestrator

@@ -3,12 +3,15 @@
 from fastapi import APIRouter
 
 from app.api import (
+    access_requests,
+    admin,
     auth_bluesky,
     auth_instagram,
     auth_linkedin,
     auth_mastodon,
     auth_threads,
     auth_x,
+    me,
     posts,
     prompts,
     templates,
@@ -22,6 +25,9 @@ api_router.include_router(auth_mastodon.router)
 api_router.include_router(auth_threads.router)
 api_router.include_router(auth_instagram.router)
 api_router.include_router(auth_x.router)
+api_router.include_router(me.router)
+api_router.include_router(access_requests.router)
+api_router.include_router(admin.router)
 api_router.include_router(trends.router)
 api_router.include_router(posts.router)
 api_router.include_router(prompts.router)

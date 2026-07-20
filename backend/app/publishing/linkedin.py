@@ -149,16 +149,19 @@ class LinkedInPublisher(Publisher):
 
 
 async def load_account(
-    session: AsyncSession, post: Post  # noqa: ARG001 — kept for parity w/ other loaders
+    session: AsyncSession, post: Post
 ) -> LinkedInAccount:
-    """MVP: single-user, single connected personal account."""
+    """The connected personal LinkedIn account for the post's workspace."""
     from sqlalchemy import select
 
     from app.models.base import AccountKind
 
     stmt = (
         select(LinkedInAccount)
-        .where(LinkedInAccount.account_kind == AccountKind.personal)
+        .where(
+            LinkedInAccount.workspace_id == post.workspace_id,
+            LinkedInAccount.account_kind == AccountKind.personal,
+        )
         .order_by(LinkedInAccount.created_at.desc())
         .limit(1)
     )

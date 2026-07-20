@@ -56,6 +56,7 @@ Kill the current ~800-line home wall (`frontend/app/page.tsx`), which mixes *set
 │  ✓ Published       ← live history + (future) performance        │
 │  ───────────────                                                 │
 │  ⚙ Settings       ← connections, prompts, templates, voice      │
+│  ⛊ Admin          ← ADMIN-ONLY: access requests + user mgmt     │
 │                                                                  │
 │  [token health pill]  ← LinkedIn day-60 expiry, always visible  │
 │  [shivam@…  ▾]                                                   │
@@ -66,6 +67,8 @@ Kill the current ~800-line home wall (`frontend/app/page.tsx`), which mixes *set
 - **Brand switcher lives now:** CLAUDE.md mandates multi-company without rewrites. A `[◆ Nestwhirr ▾]` switcher at the top of the rail makes the mental model "I'm working *inside a brand*," so brand #2 is a dropdown entry, not an IA redesign. Today it's one static entry — the seam is what matters.
 - **Token-health pill is global chrome:** the biggest operational failure mode is the LinkedIn day-60 token death (refresh tokens are structurally unavailable — see `CONTEXT.md` / memory). That risk follows the operator everywhere. Amber ≤10d, red ≤3d — promote the existing `tokenExpiry()` logic to global chrome.
 - **Badges = "what needs me":** Inbox badge = unconsumed trends; Drafts badge = posts in `draft`/`failed` awaiting action. Navigation becomes a worklist.
+- **Logged-out `/` is a marketing landing (Phase 14), not the app:** the root route gates on session — no session renders a public landing (hero · what-it-does · how-it-works = the pipeline spine · request-access form), a signed-in operator renders Today unchanged. The landing wears the *same* minimal-dark + serif-display identity (it IS the artifact, not a SaaS hero); AppShell renders it bare (no rail) since the rail only mounts with a session. The request form posts to the public `POST /access-requests` (honeypot-guarded) and feeds the `/admin` queue. `/login` stays the invited-user door. Both the landing and `/login` literally render the artifact — `components/marketing/PostCardMock.tsx` is a web-scaled replica of `quote_card.html` (black field, serif-italic pull-quote, open-quote glyph, hairline rule + uppercase brand strap) — leading the hero and the login split-panel. This is the "studio looks like the artifact it produces" rule applied to the outermost surfaces; never let either fall back to a token-less/SaaS hero.
+- **Admin is a role-gated rail entry (Phase 14), not a new IA pattern:** it sits below Settings behind a hairline divider and renders only when `GET /me` reports `role === "admin"` (the same gate hides it in the mobile account menu). Editors/viewers never see it. Inside, it reuses the Settings blueprint verbatim — `?tab=` sub-nav (Requests · Users), max-w-3xl column, minimal-dark tokens — so it adds a surface without adding a visual language. It's the operator console for the invite-only funnel: review `access_requests`, approve (→ Supabase invite) / deny, change roles, revoke.
 
 ---
 

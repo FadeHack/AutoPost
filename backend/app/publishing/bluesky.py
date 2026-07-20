@@ -188,12 +188,13 @@ class BlueskyPublisher(Publisher):
 
 
 async def load_account(
-    session: AsyncSession, post: Post  # noqa: ARG001
+    session: AsyncSession, post: Post
 ) -> BlueskyAccount:
     from sqlalchemy import select
 
     stmt = (
         select(BlueskyAccount)
+        .where(BlueskyAccount.workspace_id == post.workspace_id)
         .order_by(BlueskyAccount.created_at.desc())
         .limit(1)
     )

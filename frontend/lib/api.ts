@@ -27,6 +27,18 @@ export async function apiGet<T>(path: string): Promise<T> {
   return (await r.json()) as T;
 }
 
+// Unauthenticated POST — for the public access-request intake, which runs on the
+// logged-out landing page where there's no session to attach a bearer to.
+export async function apiPostPublic<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  });
+  if (!r.ok) throw new ApiError(r.status, await r.text());
+  return (await r.json()) as T;
+}
+
 export async function apiPost<T>(path: string, body?: unknown): Promise<T> {
   const headers = await authHeader();
   const r = await fetch(`${API_BASE}${path}`, {

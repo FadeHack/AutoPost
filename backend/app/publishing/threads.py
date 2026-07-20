@@ -238,13 +238,14 @@ class ThreadsPublisher(Publisher):
 
 
 async def load_account(
-    session: AsyncSession, post: Post  # noqa: ARG001 — parity with other loaders
+    session: AsyncSession, post: Post
 ) -> ThreadsAccount:
     from sqlalchemy import select
 
     row = (
         await session.execute(
             select(ThreadsAccount)
+            .where(ThreadsAccount.workspace_id == post.workspace_id)
             .order_by(ThreadsAccount.created_at.desc())
             .limit(1)
         )

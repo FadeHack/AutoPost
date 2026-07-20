@@ -34,6 +34,13 @@ class BlueskyAccount(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
+    # Tenant boundary (Phase 14). Scoping key for this connected account.
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
     # Handle stored plaintext — public identifier (e.g. `nestwhirr.bsky.social`),
     # not a secret. Used to look the account up; also displayed in the dashboard.
     handle: Mapped[str] = mapped_column(String(255), nullable=False)

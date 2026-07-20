@@ -402,12 +402,12 @@ class _Session:
 
 async def test_load_account_returns_latest():
     acc = _account()
-    assert await th.load_account(_Session(acc), post=None) is acc
+    assert await th.load_account(_Session(acc), post=SimpleNamespace(workspace_id=uuid4())) is acc
 
 
 async def test_load_account_raises_when_none():
     with pytest.raises(PermanentPublishError):
-        await th.load_account(_Session(None), post=None)
+        await th.load_account(_Session(None), post=SimpleNamespace(workspace_id=uuid4()))
 
 
 def test_publish_errors_are_publisherror_subclasses():

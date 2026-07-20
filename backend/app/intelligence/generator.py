@@ -797,6 +797,7 @@ async def _build_platform_commentary(
 async def generate_draft(
     session: AsyncSession,
     *,
+    workspace_id: UUID,
     category: PostCategory,
     trend_ids: list[UUID] | None = None,
     platforms: list[Platform] | None = None,
@@ -844,6 +845,7 @@ async def generate_draft(
     canonical_text = f"{hook.strip()}\n\n{body.strip()}"
 
     post = Post(
+        workspace_id=workspace_id,
         category=category,
         hook=hook[:512],
         body=body,

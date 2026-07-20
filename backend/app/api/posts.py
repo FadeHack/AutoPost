@@ -32,10 +32,10 @@ from pydantic import BaseModel, ConfigDict, Field, computed_field
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.auth import get_current_user
+from app.core.auth import get_current_workspace
 from app.db import get_session
 from app.intelligence.generator import extract_visual_fields, generate_draft
-from app.models import GeneratedAsset, Post, PostTarget, PublishingLog, User
+from app.models import GeneratedAsset, Post, PostTarget, PublishingLog
 from app.models.base import PublishingStatus as PLStatus
 from app.models.base import Platform, PostCategory, PostStatus, RenderKind, TargetStatus
 from app.publishing.orchestrator import publish_all_targets
@@ -48,6 +48,20 @@ from app.scheduler.jobs import (
 from app.scheduler.scheduler import get_scheduler
 
 router = APIRouter(prefix="/posts", tags=["posts"])
+
+
+async def _load_owned_post(
+    session: AsyncSession, post_id: UUID, workspace_id: UUID
+) -> Post:
+    """Fetch a post scoped to the caller's workspace. Returns 404 (not 403) when
+    the id is missing OR belongs to another workspace, so cross-tenant probing
+    can't distinguish "not yours" from "doesn't exist" (IDOR guard)."""
+    post = await session.get(Post, post_id)
+    if post is None or post.workspace_id != workspace_id:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
+        )
+    return post
 
 
 class GenerateRequest(BaseModel):
@@ -106,11 +120,12 @@ class PostRead(BaseModel):
 async def generate(
     body: GenerateRequest,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     try:
         post = await generate_draft(
             session,
+            workspace_id=workspace_id,
             category=body.category,
             trend_ids=body.trend_ids,
             platforms=body.platforms,
@@ -133,10 +148,14 @@ async def list_posts(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, description="Skip N rows — drives 'Load more'."),
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> list[PostRead]:
     stmt = (
-        select(Post).order_by(Post.created_at.desc()).limit(limit).offset(offset)
+        select(Post)
+        .where(Post.workspace_id == workspace_id)
+        .order_by(Post.created_at.desc())
+        .limit(limit)
+        .offset(offset)
     )
     if status:
         try:
@@ -170,13 +189,15 @@ class PostStats(BaseModel):
 @router.get("/stats", response_model=PostStats)
 async def post_stats(
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostStats:
     """Aggregate counts (one GROUP BY + one filtered count) — cheap on the DB,
     replaces the 5–7 full-list fetches the dashboard used to do for counts."""
     rows = (
         await session.execute(
-            select(Post.status, func.count()).group_by(Post.status)
+            select(Post.status, func.count())
+            .where(Post.workspace_id == workspace_id)
+            .group_by(Post.status)
         )
     ).all()
     counts = {st.value: n for st, n in rows}
@@ -186,7 +207,11 @@ async def post_stats(
         await session.execute(
             select(func.count())
             .select_from(Post)
-            .where(Post.status == PostStatus.published, Post.published_at >= cutoff)
+            .where(
+                Post.workspace_id == workspace_id,
+                Post.status == PostStatus.published,
+                Post.published_at >= cutoff,
+            )
         )
     ).scalar_one()
 
@@ -197,13 +222,9 @@ async def post_stats(
 async def get_post(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     return PostRead.model_validate(post)
 
 
@@ -248,16 +269,12 @@ async def update_post(
     post_id: UUID,
     body: PostUpdate,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """Edit a draft's hook / body / tags. Locked once status leaves `draft`
     so the approval gate is meaningful — to change an approved post, revert
     to draft (not yet exposed) or regenerate."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status != PostStatus.draft:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -299,16 +316,12 @@ async def approve_post(
     post_id: UUID,
     body: ApproveRequest,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """draft → approved. Targets are normally already attached (pre-generated)
     so this is just a status flip. For legacy back-fill, accepts `targets` and
     creates rows on the fly if the draft has none."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status != PostStatus.draft:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -350,7 +363,7 @@ async def schedule_post(
     post_id: UUID,
     body: ScheduleRequest,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """Schedule (or reschedule) an approved post for ALL its targets.
 
@@ -358,11 +371,7 @@ async def schedule_post(
     platform runs its own retry loop and writes its own PublishingLog rows.
     Idempotent on reschedule via `replace_existing=True` per target.
     """
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status not in (PostStatus.approved, PostStatus.scheduled):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -415,7 +424,7 @@ async def schedule_post(
 async def publish_now(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """Bypass the scheduler and publish inline to every PostTarget.
 
@@ -423,11 +432,7 @@ async def publish_now(
     (each target gets its own retry loop). Returns 502 if every target ended
     up failed, 200 otherwise so partial-success is visible to the dashboard.
     """
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status not in (PostStatus.approved, PostStatus.scheduled):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -482,16 +487,12 @@ async def publish_now(
 async def retry_publish(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """Re-attempt every `failed` target on a post. Each failed target flips
     back to `pending` (clearing its error) and the orchestrator re-fans out.
     Already-published targets are untouched."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status != PostStatus.failed:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -537,15 +538,11 @@ async def retry_publish(
 async def unapprove_post(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """approved → draft. Drops every PostTarget (operator re-picks platforms
     on the next approve). Reopens the post for editing."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status != PostStatus.approved:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -565,16 +562,12 @@ async def unapprove_post(
 async def unschedule_post(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> PostRead:
     """scheduled → approved. Cancels every pending APScheduler one-shot so
     they don't fire after the operator pulled the plug. Targets stay
     attached — operator can reschedule without re-picking platforms."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status != PostStatus.scheduled:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -596,17 +589,13 @@ async def unschedule_post(
 async def delete_post(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> Response:
     """Hard-delete a draft or failed post. Cascades to generated_assets +
     publishing_logs via DB ON DELETE CASCADE; ai_generations is SET NULL
     so the audit trail survives. Approved/scheduled/publishing/published
     must be lifecycle-reversed first."""
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail="post not found"
-        )
+    post = await _load_owned_post(session, post_id, workspace_id)
     if post.status not in (PostStatus.draft, PostStatus.failed):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -636,9 +625,10 @@ class PublishingLogRead(BaseModel):
 async def list_logs(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> list[PublishingLogRead]:
     """All publish attempts for a post, newest-first."""
+    await _load_owned_post(session, post_id, workspace_id)  # 404 if not in workspace
     stmt = (
         select(PublishingLog)
         .where(PublishingLog.post_id == post_id)
@@ -689,9 +679,10 @@ async def render(
     post_id: UUID,
     body: RenderRequest,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> GeneratedAssetRead:
     """Render ONE image — a single template, or one slide of a carousel."""
+    await _load_owned_post(session, post_id, workspace_id)  # 404 if not in workspace
     try:
         asset = await render_post(
             session,
@@ -722,9 +713,10 @@ async def render_carousel(
     post_id: UUID,
     body: RenderCarouselRequest,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> list[GeneratedAssetRead]:
     """Render every slide of a carousel post in one call. Returns N assets."""
+    await _load_owned_post(session, post_id, workspace_id)  # 404 if not in workspace
     try:
         assets = await render_post_carousel(
             session,
@@ -817,7 +809,7 @@ async def upload_image(
     post_id: UUID,
     file: UploadFile = File(...),
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> GeneratedAssetRead:
     """Attach an operator-uploaded custom image to a post as a GeneratedAsset.
 
@@ -825,9 +817,7 @@ async def upload_image(
     exactly as uploaded (no template, no render). The resulting asset flows
     through publishing identically to a rendered one.
     """
-    post = await session.get(Post, post_id)
-    if post is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="post not found")
+    post = await _load_owned_post(session, post_id, workspace_id)
 
     ext = _UPLOAD_CONTENT_TYPES.get((file.content_type or "").lower())
     if ext is None:
@@ -876,10 +866,11 @@ async def upload_image(
 async def list_targets(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> list[PostTargetRead]:
     """Per-platform PostTarget rows for a post, oldest-first (creation order
     matches the operator's pick order at approve time)."""
+    await _load_owned_post(session, post_id, workspace_id)  # 404 if not in workspace
     stmt = (
         select(PostTarget)
         .where(PostTarget.post_id == post_id)
@@ -893,8 +884,9 @@ async def list_targets(
 async def list_assets(
     post_id: UUID,
     session: AsyncSession = Depends(get_session),
-    _: User = Depends(get_current_user),
+    workspace_id: UUID = Depends(get_current_workspace),
 ) -> list[GeneratedAssetRead]:
+    await _load_owned_post(session, post_id, workspace_id)  # 404 if not in workspace
     stmt = (
         select(GeneratedAsset)
         .where(GeneratedAsset.post_id == post_id)

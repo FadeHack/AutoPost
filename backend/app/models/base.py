@@ -13,6 +13,7 @@ __all__ = [
     "TimestampMixin",
     "uuid_pk",
     "UserRole",
+    "AccessRequestStatus",
     "AccountKind",
     "TrendSource",
     "PostCategory",
@@ -54,6 +55,15 @@ class UserRole(str, enum.Enum):
     admin = "admin"
     editor = "editor"
     viewer = "viewer"
+
+
+class AccessRequestStatus(str, enum.Enum):
+    """Public access-request lifecycle (Phase 14). `pending` on intake; an admin
+    moves it to `approved` (→ Supabase invite + provisioned user/workspace) or
+    `denied`. Terminal states are `approved`/`denied`."""
+    pending = "pending"
+    approved = "approved"
+    denied = "denied"
 
 
 class AccountKind(str, enum.Enum):
