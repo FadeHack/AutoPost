@@ -179,7 +179,7 @@ function Today() {
     <main className="mx-auto w-full max-w-5xl px-6 py-10">
       <header className="mb-8 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">Today</h1>
+          <h1 className="font-display text-3xl tracking-tight text-ink-hi">Today</h1>
           <p className="mt-1 text-sm text-ink-mid">{dateLabel}</p>
         </div>
         <Link
@@ -276,7 +276,7 @@ function Today() {
                 href={stage.href}
                 className="group flex min-w-[88px] flex-1 flex-col rounded-md border border-border bg-surface-1 px-4 py-3 transition-colors hover:border-ink-lo"
               >
-                <span className="font-serif text-2xl text-ink-hi">
+                <span className="font-display text-2xl text-ink-hi">
                   {loading ? "—" : stage.count}
                 </span>
                 <span className="mt-0.5 text-xs text-ink-mid group-hover:text-ink-hi">
@@ -365,7 +365,7 @@ function Counter({
       </span>
       <span
         className={
-          "mt-1 font-serif text-3xl " +
+          "mt-1 font-display text-3xl " +
           (alert ? "text-status-failed" : "text-ink-hi")
         }
       >

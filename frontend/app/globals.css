@@ -2,56 +2,179 @@
 
 /*
   AutoPost — by Nestwhirr · design tokens (DESIGN.md §3)
-  The studio wears the artifact's identity: near-black surfaces, hairline
-  borders, a warm parchment accent (the card's brand-strap tone — NOT SaaS
-  blue), and the exact system serif stack the rendered cards use.
-  Dark-only and intentional — no prefers-color-scheme boilerplate.
+
+  Newsroom / print-magazine identity. The studio wears the artifact's identity:
+  a real editorial type system (Fraunces display + Newsreader serif), a warm
+  ink-and-paper palette, hairline column rules, and considered restraint.
+
+  Dual theme: warm-paper LIGHT and refined warm-DARK share one token contract.
+  Semantic vars live on :root / [data-theme] and are mapped into @theme inline,
+  so every existing `bg-bg` / `text-ink-hi` / `border-border` utility just works
+  and re-themes for free. The rendered PNG cards stay dark always (fixed output
+  identity) — only the chrome themes.
 */
 
-@theme inline {
-  /* Surfaces */
-  --color-bg: #0a0a0b; /* near-black — the card background, echoed */
-  --color-surface-1: #0f0f11; /* raised panels */
-  --color-surface-2: #16161a; /* inputs, hover */
-  --color-border: #232328; /* hairline, low-contrast for calm density */
+/* ---- LIGHT (default / warm paper) ---------------------------------------- */
+:root {
+  --bg: #faf8f3; /* warm newsprint paper, never stark white */
+  --surface-1: #f4f1e9; /* raised panels */
+  --surface-2: #ebe7db; /* inputs, hover */
+  --surface-3: #e2ddce; /* pressed / active wells */
+  --border: #ddd6c5; /* hairline column rule */
+  --border-strong: #c8c0ab; /* emphasized rule */
 
-  /* Ink */
-  --color-ink-hi: #f4f4f5; /* primary text */
-  --color-ink-mid: #a1a1aa; /* secondary */
-  --color-ink-lo: #52525b; /* metadata */
+  --ink-hi: #1a1815; /* primary ink */
+  --ink-mid: #56524a; /* secondary */
+  --ink-lo: #8b8579; /* metadata / footnotes */
 
-  /* Accent — the "accent line above brand strap", parchment/paper-ink */
-  --color-accent: #e8e1d3;
-  --color-accent-ink: #0a0a0b; /* text on an accent fill */
+  /* The signature ink — the editorial accent (masthead numerals, CTA, active).
+     Near-black on paper reads like broadsheet ink, not SaaS blue. */
+  --accent: #1a1815;
+  --accent-ink: #faf8f3; /* text/inverse on an accent fill */
 
-  /* Pipeline status (semantic, used sparingly) */
-  --color-status-draft: #a1a1aa; /* neutral */
-  --color-status-approved: #e8e1d3; /* parchment-accent */
-  --color-status-scheduled: #818cf8; /* indigo */
-  --color-status-publishing: #fbbf24; /* amber, pulsing in use */
-  --color-status-published: #34d399; /* emerald */
-  --color-status-failed: #f87171; /* red */
+  --status-draft: #8b8579;
+  --status-approved: #9c7b34; /* aged-gold */
+  --status-scheduled: #4f5bd5; /* indigo ink */
+  --status-publishing: #b7791f; /* amber */
+  --status-published: #1f7a4d; /* press green */
+  --status-failed: #c0392b; /* oxblood */
 
-  /* Type — serif DISPLAY matches the cards verbatim; sans/mono via next/font */
-  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
-  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
-  --font-serif: ui-serif, Georgia, "Times New Roman", serif;
+  color-scheme: light;
 }
 
-html {
-  background: var(--color-bg);
+/* ---- DARK (refined warm) ------------------------------------------------- */
+:root[data-theme="dark"] {
+  --bg: #0c0b0d; /* warm near-black — the card field, echoed */
+  --surface-1: #131216; /* raised panels */
+  --surface-2: #1b1a1f; /* inputs, hover */
+  --surface-3: #232228; /* pressed / active wells */
+  --border: #2a2930; /* hairline column rule (a touch stronger than before) */
+  --border-strong: #3b3a43;
+
+  --ink-hi: #f5f4f1; /* warm white */
+  --ink-mid: #a8a6a0;
+  --ink-lo: #6a6862;
+
+  /* Parchment — the card's "accent line above brand strap" tone. */
+  --accent: #e8e1d3;
+  --accent-ink: #0c0b0d;
+
+  --status-draft: #a1a1aa;
+  --status-approved: #e8e1d3;
+  --status-scheduled: #818cf8;
+  --status-publishing: #fbbf24;
+  --status-published: #34d399;
+  --status-failed: #f87171;
+
   color-scheme: dark;
 }
 
+/* Pre-hydration default follows the OS when no explicit choice is stored.
+   The no-flash script in layout stamps data-theme before paint; this media
+   block only governs the very first paint when the attribute is absent. */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --bg: #0c0b0d;
+    --surface-1: #131216;
+    --surface-2: #1b1a1f;
+    --surface-3: #232228;
+    --border: #2a2930;
+    --border-strong: #3b3a43;
+    --ink-hi: #f5f4f1;
+    --ink-mid: #a8a6a0;
+    --ink-lo: #6a6862;
+    --accent: #e8e1d3;
+    --accent-ink: #0c0b0d;
+    --status-draft: #a1a1aa;
+    --status-approved: #e8e1d3;
+    --status-scheduled: #818cf8;
+    --status-publishing: #fbbf24;
+    --status-published: #34d399;
+    --status-failed: #f87171;
+    color-scheme: dark;
+  }
+}
+
+@theme inline {
+  /* Surfaces */
+  --color-bg: var(--bg);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-surface-3: var(--surface-3);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  /* Ink */
+  --color-ink-hi: var(--ink-hi);
+  --color-ink-mid: var(--ink-mid);
+  --color-ink-lo: var(--ink-lo);
+
+  /* Accent */
+  --color-accent: var(--accent);
+  --color-accent-ink: var(--accent-ink);
+
+  /* Pipeline status (semantic, used sparingly) */
+  --color-status-draft: var(--status-draft);
+  --color-status-approved: var(--status-approved);
+  --color-status-scheduled: var(--status-scheduled);
+  --color-status-publishing: var(--status-publishing);
+  --color-status-published: var(--status-published);
+  --color-status-failed: var(--status-failed);
+
+  /* Type — Fraunces = DISPLAY (masthead, headlines, numerals); Newsreader =
+     editorial serif (pull-quotes, card body); Geist = UI sans; Geist Mono =
+     metadata. The serif split IS the brand — it mirrors the card construction. */
+  --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-geist-mono), ui-monospace, monospace;
+  --font-display: var(--font-fraunces), ui-serif, Georgia, serif;
+  --font-serif: var(--font-newsreader), ui-serif, Georgia, serif;
+}
+
+html {
+  background: var(--bg);
+}
+
 body {
-  background: var(--color-bg);
-  color: var(--color-ink-hi);
+  background: var(--bg);
+  color: var(--ink-hi);
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
 }
 
 /* Calm, hairline scrollbars — part of the restraint, not an afterthought */
 * {
   scrollbar-width: thin;
-  scrollbar-color: var(--color-border) transparent;
+  scrollbar-color: var(--border-strong) transparent;
+}
+
+/* ---- Newsroom primitives ------------------------------------------------- */
+
+/* `font-display` utility is auto-generated from --font-display in @theme.
+   Fraunces carries an `opsz` axis, so optical sizing is applied by the browser. */
+
+/* Drop-cap for empty states / editorial openers — a Fraunces initial that
+   sinks two lines, the classic print signal. Apply to a wrapping element. */
+.dropcap::first-letter {
+  font-family: var(--font-display);
+  font-weight: 500;
+  float: left;
+  line-height: 0.72;
+  font-size: 3.1em;
+  padding-right: 0.09em;
+  padding-top: 0.02em;
+  color: var(--accent);
+}
+
+/* Reduced motion: neutralize transitions/animations for motion-sensitive users.
+   Motion (framer) reads prefers-reduced-motion too; this covers CSS as well. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

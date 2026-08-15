@@ -8,6 +8,7 @@ import { BrandSwitcher } from "./BrandSwitcher";
 import { CommandBar } from "./CommandBar";
 import { MobileTopBar } from "./MobileTopBar";
 import { NavRail, MobileTabBar } from "./NavRail";
+import { ThemeToggle } from "./ThemeToggle";
 import { TokenHealthPill } from "./TokenHealthPill";
 
 const RAIL_KEY = "autopost:rail-collapsed";
@@ -150,6 +151,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                   </kbd>
                 )}
               </button>
+
+              <ThemeToggle collapsed={!expanded} />
 
               <TokenHealthPill collapsed={!expanded} />
 

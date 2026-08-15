@@ -330,7 +330,7 @@ function TrendsInbox() {
       <div className="shrink-0 px-6 pt-10">
         <header className="mb-6 flex flex-wrap items-end justify-between gap-4">
           <div>
-            <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+            <h1 className="font-display text-3xl tracking-tight text-ink-hi">
               Inbox
             </h1>
             <p className="mt-2 text-sm text-ink-mid">

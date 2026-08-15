@@ -277,7 +277,7 @@ function BoardOverview() {
       {/* Fixed chrome — header + generate strip. */}
       <div className="shrink-0 px-6 pt-10">
         <header className="mb-6">
-          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+          <h1 className="font-display text-3xl tracking-tight text-ink-hi">
             Drafts
           </h1>
           <p className="mt-2 text-sm text-ink-mid">
@@ -462,7 +462,7 @@ function StatusListView({ status }: { status: "draft" | "approved" }) {
         >
           ← Board
         </Link>
-        <h1 className="mt-2 font-serif text-3xl tracking-tight text-ink-hi">
+        <h1 className="mt-2 font-display text-3xl tracking-tight text-ink-hi">
           {label}
         </h1>
         <p className="mb-6 mt-2 text-sm text-ink-mid">
