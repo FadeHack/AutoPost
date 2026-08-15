@@ -27,7 +27,7 @@ export function BrandSwitcher({ collapsed = false }: { collapsed?: boolean }) {
         className="flex w-full items-center gap-2.5 rounded-md px-2 py-2 text-left transition-colors hover:bg-surface-2"
         title={`${CURRENT_BRAND} — switch brand`}
       >
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent font-serif text-sm text-accent-ink">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-accent font-display text-sm text-accent-ink">
           {CURRENT_BRAND[0]}
         </span>
         {!collapsed && (
@@ -51,7 +51,7 @@ export function BrandSwitcher({ collapsed = false }: { collapsed?: boolean }) {
       {open && !collapsed && (
         <div className="absolute left-0 right-0 top-full z-30 mt-1 overflow-hidden rounded-md border border-border bg-surface-1 shadow-2xl shadow-black/60">
           <div className="flex items-center gap-2.5 px-2.5 py-2 text-sm">
-            <span className="flex h-6 w-6 items-center justify-center rounded bg-accent font-serif text-xs text-accent-ink">
+            <span className="flex h-6 w-6 items-center justify-center rounded bg-accent font-display text-xs text-accent-ink">
               {CURRENT_BRAND[0]}
             </span>
             <span className="flex-1 truncate text-ink-hi">{CURRENT_BRAND}</span>

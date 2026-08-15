@@ -5,6 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useAuth } from "@/components/auth-provider";
 import { useMe } from "@/lib/useMe";
 import { BrandSwitcher } from "./BrandSwitcher";
+import { ThemeToggle } from "./ThemeToggle";
 import { TokenHealthPill } from "./TokenHealthPill";
 
 // Mobile app bar (DESIGN.md §6). The bottom tab bar carries primary navigation;
@@ -55,6 +56,8 @@ export function MobileTopBar() {
       </div>
 
       <TokenHealthPill collapsed />
+
+      <ThemeToggle variant="icon" />
 
       <Link
         href="/settings"

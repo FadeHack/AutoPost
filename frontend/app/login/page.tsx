@@ -46,7 +46,7 @@ export default function LoginPage() {
       <aside className="hidden flex-col justify-between border-r border-border bg-surface-1/30 p-12 lg:flex">
         <a
           href="/"
-          className="flex items-center gap-2.5 font-serif text-lg tracking-tight text-ink-hi"
+          className="flex items-center gap-2.5 font-display text-lg tracking-tight text-ink-hi"
         >
           <span className="inline-block h-2 w-2 rotate-45 bg-accent" aria-hidden />
           Nestwhirr Studio
@@ -67,13 +67,13 @@ export default function LoginPage() {
         <div className="w-full max-w-sm">
           <a
             href="/"
-            className="mb-10 flex items-center gap-2.5 font-serif text-lg tracking-tight text-ink-hi lg:hidden"
+            className="mb-10 flex items-center gap-2.5 font-display text-lg tracking-tight text-ink-hi lg:hidden"
           >
             <span className="inline-block h-2 w-2 rotate-45 bg-accent" aria-hidden />
             Nestwhirr Studio
           </a>
 
-          <h1 className="font-serif text-3xl tracking-tight text-ink-hi">
+          <h1 className="font-display text-3xl tracking-tight text-ink-hi">
             Sign in
           </h1>
           <p className="mt-2 text-sm text-ink-mid">

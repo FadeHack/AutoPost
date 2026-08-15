@@ -47,7 +47,7 @@ function AdminInner() {
   return (
     <main className="mx-auto w-full max-w-3xl px-6 py-10">
       <header className="mb-8">
-        <h1 className="font-serif text-3xl tracking-tight text-ink-hi">Admin</h1>
+        <h1 className="font-display text-3xl tracking-tight text-ink-hi">Admin</h1>
         <p className="mt-2 text-sm text-ink-mid">
           Review access requests and manage who can use the platform.
         </p>

@@ -4,11 +4,9 @@
     <meta charset="utf-8" />
     <title>{{ hook|truncate(60) }}</title>
     <script src="https://cdn.tailwindcss.com"></script>
+    {% include "_fonts.html" %}
     <style>
-      /* Webfonts swap fast; the system serif stack is the typographic identity. */
       html, body { background: #000; }
-      .serif { font-family: ui-serif, Georgia, "Times New Roman", serif; }
-      .sans  { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
     </style>
   </head>
   <body class="m-0 p-0">
@@ -21,7 +19,7 @@
 
       <!-- Headline -->
       <div class="flex-1 flex items-center">
-        <h1 class="serif text-zinc-50 text-7xl leading-tight tracking-tight">
+        <h1 class="display text-zinc-50 text-7xl leading-tight tracking-tight">
           {{ hook }}
         </h1>
       </div>
