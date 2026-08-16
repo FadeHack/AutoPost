@@ -40,8 +40,6 @@ class Trend(Base, TimestampMixin):
         nullable=False,
         index=True,
     )
-    consumed_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True),
-        nullable=True,
-        index=True,
-    )
+    # NOTE: consumption is per-workspace as of 2026-08-16 — see
+    # `TrendConsumption`, not a column on this shared row. A trend consumed
+    # by one workspace must not read as consumed for another.

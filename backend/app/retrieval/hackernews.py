@@ -8,10 +8,12 @@ get the HN item URL as fallback so they still link somewhere.
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import structlog
 
+from app.config import settings
 from app.models.base import TrendSource
 from app.retrieval.base import Fetcher, TrendItem
 
@@ -19,6 +21,10 @@ log = structlog.get_logger()
 
 HN_BASE = "https://hacker-news.firebaseio.com/v0"
 USER_AGENT = "AutoPost/0.1"
+# Mirrors `settings.TREND_RETENTION_DAYS` — RSS already age-filters at ingest
+# (see rss.py); HN's `top`/`best` endpoints can still surface an older
+# evergreen story, so apply the same cutoff here (2026-08-16).
+MAX_ITEM_AGE = timedelta(days=settings.TREND_RETENTION_DAYS)
 
 
 class HackerNewsFetcher(Fetcher):
@@ -78,6 +84,12 @@ class HackerNewsFetcher(Fetcher):
             return None
         if data.get("type") != "story":
             return None
+
+        item_time = data.get("time")
+        if item_time is not None:
+            posted_at = datetime.fromtimestamp(item_time, tz=timezone.utc)
+            if datetime.now(timezone.utc) - posted_at > MAX_ITEM_AGE:
+                return None
 
         title = (data.get("title") or "").strip()[:1024]
         url = data.get("url") or f"https://news.ycombinator.com/item?id={hid}"

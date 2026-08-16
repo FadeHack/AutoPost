@@ -27,7 +27,8 @@ from typing import Any
 from uuid import UUID
 
 import structlog
-from sqlalchemy import nulls_last, select
+from sqlalchemy import and_, nulls_last, select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import settings
@@ -37,6 +38,7 @@ from app.models.post import Post
 from app.models.post_target import PostTarget
 from app.models.prompt import Prompt
 from app.models.trend import Trend
+from app.models.trend_consumption import TrendConsumption
 
 log = structlog.get_logger(__name__)
 
@@ -313,6 +315,7 @@ async def _load_platform_prompt(
 
 async def _pick_trends(
     session: AsyncSession,
+    workspace_id: UUID,
     trend_ids: list[UUID] | None,
     limit: int,
 ) -> list[Trend]:
@@ -322,9 +325,19 @@ async def _pick_trends(
         by_id = {r.id: r for r in rows}
         # Preserve caller-supplied order.
         return [by_id[i] for i in trend_ids if i in by_id]
+    # "Unconsumed" is per-workspace (2026-08-16) — the shared trend pool is
+    # read by every workspace independently, so this workspace's picks must
+    # not skip a trend another workspace already generated from.
     stmt = (
         select(Trend)
-        .where(Trend.consumed_at.is_(None))
+        .outerjoin(
+            TrendConsumption,
+            and_(
+                TrendConsumption.trend_id == Trend.id,
+                TrendConsumption.workspace_id == workspace_id,
+            ),
+        )
+        .where(TrendConsumption.consumed_at.is_(None))
         .order_by(nulls_last(Trend.score.desc()), Trend.fetched_at.desc())
         .limit(limit)
     )
@@ -827,7 +840,7 @@ async def generate_draft(
     # the platform=NULL legacy prompt for categories without a full matrix.
     prompt = await _load_active_prompt(session, category, platform=Platform.linkedin)
 
-    picked = await _pick_trends(session, trend_ids, limit=max_trends)
+    picked = await _pick_trends(session, workspace_id, trend_ids, limit=max_trends)
     if not picked:
         raise ValueError("No trends available for generation")
     picked = picked[:max_trends]
@@ -878,9 +891,24 @@ async def generate_draft(
             )
         )
 
-    now = datetime.now(timezone.utc)
-    for t in picked:
-        t.consumed_at = now
+    # Mark consumed for THIS workspace only — a shared trend that another
+    # workspace also picked stays unconsumed for that workspace.
+    if picked:
+        now = datetime.now(timezone.utc)
+        stmt = (
+            pg_insert(TrendConsumption)
+            .values(
+                [
+                    {"trend_id": t.id, "workspace_id": workspace_id, "consumed_at": now}
+                    for t in picked
+                ]
+            )
+            .on_conflict_do_update(
+                index_elements=[TrendConsumption.trend_id, TrendConsumption.workspace_id],
+                set_={"consumed_at": now},
+            )
+        )
+        await session.execute(stmt)
 
     await session.commit()
     await session.refresh(post)

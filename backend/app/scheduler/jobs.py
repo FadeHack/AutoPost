@@ -31,26 +31,29 @@ RETRIEVAL_JOB_ID = "retrieval"
 TRENDS_CLEANUP_JOB_ID = "trends_cleanup"
 
 
-async def cleanup_consumed_trends_job() -> None:
-    cutoff = datetime.now(timezone.utc) - timedelta(
-        days=settings.TRENDS_CONSUMED_RETENTION_DAYS
-    )
-    log.info("scheduler.trends_cleanup.fire", cutoff=cutoff.isoformat())
+async def trend_retention_job() -> None:
+    """Daily sweep of the shared trend pool (2026-08-16, user-confirmed 7-day
+    window). Purely time-based on `fetched_at` — NOT gated on consumption,
+    because consumption is per-workspace (`TrendConsumption`) as of this same
+    change, so there's no single "is this trend done" flag to check anymore.
+    A trend past the retention window leaves the pool for every workspace
+    regardless of who has or hasn't acted on it; `TrendConsumption` rows
+    cascade-delete with it. Safe: nothing dereferences trend content once a
+    draft exists (`Post.source_trend_ids` only ever renders as a count)."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=settings.TREND_RETENTION_DAYS)
+    log.info("scheduler.trend_retention.fire", cutoff=cutoff.isoformat())
     try:
         async with AsyncSessionLocal() as session:
             result = await session.execute(
-                delete(Trend).where(
-                    Trend.consumed_at.is_not(None),
-                    Trend.consumed_at < cutoff,
-                )
+                delete(Trend).where(Trend.fetched_at < cutoff)
             )
             await session.commit()
         log.info(
-            "scheduler.trends_cleanup.complete",
+            "scheduler.trend_retention.complete",
             deleted=result.rowcount or 0,
         )
     except Exception as e:
-        log.exception("scheduler.trends_cleanup.failed", error=str(e))
+        log.exception("scheduler.trend_retention.failed", error=str(e))
 
 
 async def retrieval_job() -> None:
@@ -137,7 +140,7 @@ def register_recurring_jobs(scheduler: AsyncIOScheduler) -> None:
         coalesce=True,
     )
     scheduler.add_job(
-        cleanup_consumed_trends_job,
+        trend_retention_job,
         trigger=CronTrigger.from_crontab(
             settings.TRENDS_CLEANUP_CRON, timezone=settings.TIMEZONE
         ),

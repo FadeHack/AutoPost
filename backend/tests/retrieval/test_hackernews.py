@@ -2,12 +2,15 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 
 from app.models.base import TrendSource
 from app.retrieval.hackernews import HackerNewsFetcher
+
+NOW = int(datetime.now(timezone.utc).timestamp())
 
 
 def _make_item(hid: int, **kwargs) -> dict:
@@ -19,7 +22,7 @@ def _make_item(hid: int, **kwargs) -> dict:
         "score": 100 + hid,
         "by": "alice",
         "descendants": hid,
-        "time": 1700000000 + hid,
+        "time": NOW - hid,  # recent by default — hid seconds ago, still fresh
     }
     base.update(kwargs)
     return base
@@ -103,3 +106,15 @@ async def test_score_captured_in_payload_and_top_field(patch_hn_client):
     assert result[0].score == 250.0
     assert result[0].raw_payload["by"] == "alice"
     assert result[0].raw_payload["descendants"] == 7
+
+
+async def test_age_cutoff_drops_stories_older_than_retention(patch_hn_client):
+    stale_time = int((datetime.now(timezone.utc) - timedelta(days=30)).timestamp())
+    items = {
+        1: _make_item(1),  # fresh (default `time`)
+        2: _make_item(2, time=stale_time),
+    }
+    patch_hn_client(_make_handler([1, 2], [], items))
+
+    result = await HackerNewsFetcher(top_n=2, best_n=0).fetch()
+    assert {r.source_id for r in result} == {"1"}

@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "@/components/auth-provider";
-import { ApiError, apiDelete, apiGet, apiPatch, apiPost } from "@/lib/api";
+import { ApiError, apiGet, apiPatch, apiPost } from "@/lib/api";
 import { Banner } from "@/components/ui/Banner";
 import { useToast } from "@/components/ui/Toast";
 import { CATEGORY_LABEL, GENERATABLE, type PostCategory } from "@/lib/domain";
@@ -14,6 +14,14 @@ import { CATEGORY_LABEL, GENERATABLE, type PostCategory } from "@/lib/domain";
 // open). Per-row Generate → deep-links into the board's generate strip with this
 // trend pinned, collapsing "read → go to drafts → pick category → find it again"
 // into one move.
+//
+// Trends are a SHARED pool across workspaces (2026-08-16) — "consumed" here
+// reflects only this workspace's read-state (`trend_consumptions`), not a
+// property of the trend itself. So "delete" is gone from this screen:
+// removing a row here would remove it from every workspace's pool. What's
+// left is "Dismiss" — non-destructive, scoped to this workspace, and (via
+// "Dismiss all") no longer requires paging through + selecting everything
+// first. Actual pool cleanup is the automatic retention sweep.
 
 type TrendSource = "rss" | "hackernews" | "reddit";
 type StatusFilter = "unconsumed" | "consumed" | "all";
@@ -94,7 +102,8 @@ function TrendsInbox() {
     useState<PostCategory>("founder_insight");
   const [error, setError] = useState("");
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [dismissingSelected, setDismissingSelected] = useState(false);
+  const [dismissingAll, setDismissingAll] = useState(false);
   const [cursor, setCursor] = useState(0);
   const [now] = useState(() => Date.now());
   const listRef = useRef<HTMLUListElement>(null);
@@ -186,25 +195,6 @@ function TrendsInbox() {
     [statusFilter],
   );
 
-  const deleteOne = useCallback(async (trend: Trend) => {
-    setError("");
-    const snapshot = trends;
-    setTrends((prev) => prev.filter((t) => t.id !== trend.id));
-    setSelected((prev) => {
-      if (!prev.has(trend.id)) return prev;
-      const next = new Set(prev);
-      next.delete(trend.id);
-      return next;
-    });
-    try {
-      await apiDelete(`/trends/${trend.id}`);
-    } catch (e) {
-      setTrends(snapshot);
-      setError(e instanceof ApiError ? e.body : (e as Error).message);
-    }
-  // intentionally only depends on `trends` snapshot
-  }, [trends]);
-
   const toggleSelect = useCallback((id: string) => {
     setSelected((prev) => {
       const next = new Set(prev);
@@ -220,44 +210,71 @@ function TrendsInbox() {
     );
   }, [trends]);
 
-  const bulkDelete = useCallback(async () => {
+  // Dismiss just the checked rows — loops the existing per-row PATCH (the
+  // selection is always same-page, so this stays a handful of requests).
+  const dismissSelected = useCallback(async () => {
     if (selected.size === 0) return;
-    if (!confirm(`Delete ${selected.size} selected trend(s)?`)) return;
-    setBulkDeleting(true);
+    setDismissingSelected(true);
     setError("");
     const ids = Array.from(selected);
     const snapshot = trends;
-    const remaining = snapshot.filter((t) => !selected.has(t.id));
+    const remaining =
+      statusFilter === "unconsumed" ? snapshot.filter((t) => !selected.has(t.id)) : snapshot;
     setTrends(remaining);
     setSelected(new Set());
-    // If we're about to empty the visible page while the DB still has more, ask
-    // the delete call to hand back a refill page in the same round-trip.
-    const wantRefill = remaining.length === 0 && hasMore;
-    const params = new URLSearchParams({ status: statusFilter });
-    if (sourceFilter !== "all") params.set("source", sourceFilter);
-    if (wantRefill) params.set("refill", String(TREND_PAGE));
     try {
-      const r = await apiPost<{ deleted: number; next: Trend[] }>(
-        `/trends/bulk-delete?${params.toString()}`,
-        { ids },
+      await Promise.all(
+        ids.map((id) => apiPatch<Trend>(`/trends/${id}`, { consumed: true })),
       );
       notify({
         tone: "success",
-        title: `Deleted ${r.deleted} trend${r.deleted === 1 ? "" : "s"}`,
+        title: `Dismissed ${ids.length} trend${ids.length === 1 ? "" : "s"}`,
       });
-      if (wantRefill) {
-        setTrends(r.next);
-        setHasMore(r.next.length === TREND_PAGE);
-        setCursor(0);
-      }
     } catch (e) {
       setTrends(snapshot);
       setSelected(new Set(ids));
       setError(e instanceof ApiError ? e.body : (e as Error).message);
     } finally {
-      setBulkDeleting(false);
+      setDismissingSelected(false);
     }
-  }, [selected, trends, hasMore, statusFilter, sourceFilter, notify]);
+  }, [selected, trends, statusFilter, notify]);
+
+  // The actual fix for "I have to Load More five times to clear the inbox":
+  // one call, no id list, no pagination — dismisses everything matching the
+  // active filter server-side and (if we just emptied the page) refills it
+  // in the same round-trip.
+  const dismissAll = useCallback(async () => {
+    if (trends.length === 0) return;
+    const label = `${trends.length}${hasMore ? "+" : ""}`;
+    if (!confirm(`Dismiss all ${label} trend(s) matching this filter?`)) return;
+    setDismissingAll(true);
+    setError("");
+    const params = new URLSearchParams({ status: statusFilter });
+    if (sourceFilter !== "all") params.set("source", sourceFilter);
+    if (statusFilter === "unconsumed") params.set("refill", String(TREND_PAGE));
+    try {
+      const r = await apiPost<{ dismissed: number; next: Trend[] }>(
+        `/trends/dismiss-all?${params.toString()}`,
+      );
+      notify({
+        tone: "success",
+        title: `Dismissed ${r.dismissed} trend${r.dismissed === 1 ? "" : "s"}`,
+      });
+      if (statusFilter === "unconsumed") {
+        setTrends(r.next);
+        setHasMore(r.next.length === TREND_PAGE);
+      } else {
+        setTrends([]);
+        setHasMore(false);
+      }
+      setSelected(new Set());
+      setCursor(0);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.body : (e as Error).message);
+    } finally {
+      setDismissingAll(false);
+    }
+  }, [trends.length, hasMore, statusFilter, sourceFilter, notify]);
 
   const generateFrom = useCallback(
     (trend: Trend) => {
@@ -437,22 +454,38 @@ function TrendsInbox() {
                   : `${counts.total} item${counts.total === 1 ? "" : "s"}${hasMore ? "+" : ""}`}
               </p>
             )}
-            {selected.size > 0 ? (
-              <button
-                type="button"
-                onClick={bulkDelete}
-                disabled={bulkDeleting}
-                className="rounded-md border border-status-failed/50 px-2.5 py-1 text-xs font-medium text-status-failed hover:bg-status-failed/10 disabled:opacity-50"
-              >
-                {bulkDeleting ? "Deleting…" : `Delete ${selected.size} selected`}
-              </button>
-            ) : (
-              trends.length > 0 && (
-                <p className="text-xs text-ink-lo">
-                  {`${counts.total} item${counts.total === 1 ? "" : "s"}${hasMore ? "+" : ""}`}
-                </p>
-              )
-            )}
+            <div className="flex items-center gap-2">
+              {selected.size > 0 && (
+                <button
+                  type="button"
+                  onClick={dismissSelected}
+                  disabled={dismissingSelected}
+                  className="rounded-md border border-border px-2.5 py-1 text-xs font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi disabled:opacity-50"
+                >
+                  {dismissingSelected
+                    ? "Dismissing…"
+                    : `Dismiss ${selected.size} selected`}
+                </button>
+              )}
+              {trends.length > 0 && (
+                <>
+                  {selected.size === 0 && (
+                    <p className="text-xs text-ink-lo">
+                      {`${counts.total} item${counts.total === 1 ? "" : "s"}${hasMore ? "+" : ""}`}
+                    </p>
+                  )}
+                  <button
+                    type="button"
+                    onClick={dismissAll}
+                    disabled={dismissingAll}
+                    className="rounded-md border border-border px-2.5 py-1 text-xs font-medium text-ink-mid hover:border-ink-lo hover:text-ink-hi disabled:opacity-50"
+                    title="Dismiss everything matching the active filter — no selection needed"
+                  >
+                    {dismissingAll ? "Dismissing…" : "Dismiss all"}
+                  </button>
+                </>
+              )}
+            </div>
           </div>
           <ul
             ref={listRef}
@@ -520,15 +553,6 @@ function TrendsInbox() {
                       title="Toggle consumed (e)"
                     >
                       {t.consumed_at ? "Unread" : "Consume"}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => deleteOne(t)}
-                      className="rounded-md border border-border px-1.5 py-1 text-xs text-ink-lo opacity-0 transition-opacity hover:border-status-failed/50 hover:text-status-failed group-hover:opacity-100"
-                      aria-label="Delete trend"
-                      title="Delete trend"
-                    >
-                      ✕
                     </button>
                   </div>
                 </li>
