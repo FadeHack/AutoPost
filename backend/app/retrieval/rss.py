@@ -33,6 +33,7 @@ import feedparser
 import httpx
 import structlog
 
+from app.config import settings
 from app.models.base import TrendSource
 from app.retrieval.base import Fetcher, TrendItem
 
@@ -61,8 +62,12 @@ DEFAULT_FEEDS: list[str] = [
 # Per-feed item cap and age cutoff. Most of our feeds publish their full
 # backlog over RSS (Stratechery returns ~1,500 entries; Hugging Face ~250).
 # Without these caps the unconsumed-trends pool fills with years-old posts.
+# Age cutoff mirrors `settings.TREND_RETENTION_DAYS` (2026-08-16,
+# user-confirmed) — one number for "how old can a trend be, ever," shared
+# with the DB-side retention sweep in scheduler/jobs.py so ingest and cleanup
+# can't drift apart.
 MAX_ENTRIES_PER_FEED = 25
-MAX_ENTRY_AGE = timedelta(days=90)
+MAX_ENTRY_AGE = timedelta(days=settings.TREND_RETENTION_DAYS)
 
 
 @dataclass

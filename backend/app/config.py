@@ -108,7 +108,12 @@ class Settings(BaseSettings):
     RETRIEVAL_CRON: str = "0 */6 * * *"
     ANALYTICS_CRON: str = "0 * * * *"
     TRENDS_CLEANUP_CRON: str = "30 3 * * *"
-    TRENDS_CONSUMED_RETENTION_DAYS: int = 60
+    # Single source of truth for trend freshness (user-confirmed 2026-08-16):
+    # RSS/HN retrieval skips anything older than this at fetch time, and the
+    # daily sweep hard-deletes any trend row past this age regardless of
+    # per-workspace consumption state (consumption is tracked in
+    # `trend_consumptions`, not on the shared `Trend` row — see CONTEXT.md).
+    TREND_RETENTION_DAYS: int = 7
 
     # Rendering / brand
     BRAND_NAME: str = "Nestwhirr"

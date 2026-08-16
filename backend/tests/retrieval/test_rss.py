@@ -72,7 +72,7 @@ async def test_happy_path_parses_entries(patch_rss_client):
             {
                 "title": "Slightly older",
                 "link": "https://feed.example.com/older",
-                "pub_date": _fmt(now - timedelta(days=10)),
+                "pub_date": _fmt(now - timedelta(days=3)),
             },
         ]
     )

@@ -29,6 +29,7 @@ from app.models.threads_account import ThreadsAccount
 from app.models.publishing_log import PublishingLog
 from app.models.template import Template
 from app.models.trend import Trend
+from app.models.trend_consumption import TrendConsumption
 from app.models.user import User
 from app.models.workspace import Workspace
 from app.models.x_account import XAccount
@@ -56,6 +57,7 @@ __all__ = [
     "InstagramAccount",
     "XAccount",
     "Trend",
+    "TrendConsumption",
     "Prompt",
     "Template",
     "Post",

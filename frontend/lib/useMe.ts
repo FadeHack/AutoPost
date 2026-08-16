@@ -14,14 +14,35 @@ export type Me = {
   email: string;
   role: Role;
   workspace_id: string;
+  workspace_name: string;
 };
 
 let cache: Me | null = null;
 let inflight: Promise<Me> | null = null;
+// Every mounted `useMe()` call registers its setter here so a write elsewhere
+// (e.g. the workspace-rename control in Settings) can push the fresh value to
+// every consumer — the rail, mobile bar, admin page — without each of them
+// re-fetching or the caller needing to know who else is listening.
+const subscribers = new Set<(m: Me) => void>();
+
+/** Update the shared cache and notify every mounted `useMe()` consumer.
+ * Call with the server's response after a write that changes `/me` data
+ * (e.g. a workspace rename) so the UI reflects it immediately. */
+export function setCachedMe(m: Me): void {
+  cache = m;
+  for (const notify of subscribers) notify(m);
+}
 
 export function useMe(): { me: Me | null; loading: boolean } {
   const [me, setMe] = useState<Me | null>(cache);
   const [loading, setLoading] = useState(!cache);
+
+  useEffect(() => {
+    subscribers.add(setMe);
+    return () => {
+      subscribers.delete(setMe);
+    };
+  }, []);
 
   useEffect(() => {
     // State already initializes from `cache`, so a warm cache needs no work

@@ -7,6 +7,7 @@ import Connections from "@/components/settings/Connections";
 import Prompts from "@/components/settings/Prompts";
 import Templates from "@/components/settings/Templates";
 import VoiceRules from "@/components/settings/VoiceRules";
+import WorkspaceName from "@/components/settings/WorkspaceName";
 
 // Settings (DESIGN.md §5G). Sub-nav: Connections · Prompts · Templates · Voice.
 // The active tab lives in `?tab=` so panels deep-link and the browser back
@@ -51,6 +52,8 @@ function SettingsInner() {
           rules.
         </p>
       </header>
+
+      <WorkspaceName />
 
       <nav className="mb-8 flex flex-wrap gap-1 border-b border-border">
         {TABS.map((t) => (
